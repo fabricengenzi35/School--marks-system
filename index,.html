@@ -14,6 +14,24 @@
   - Timezone settings
   - Fixed pwMatch async comparison
   - Performance: debounced writes, offline queue, incremental user index
+  Safe saving for many users (v6):
+  - Every save is a compare-and-swap on the document revision: the server refuses it if someone
+    else saved first; the app then 3-way merges (last synced / mine / theirs) and retries
+  - Deletions and edits by other users are no longer undone by a stale device
+  - Unsaved work is recovered after a crash/closed tab; daily auto snapshots kept 10 days
+  - Academic codes are unique per student (checked on add, edit, import and parent sign-up)
+  Student-loss protection:
+  - A save is never written over newer server data when the server check fails (it is queued and retried)
+  - Audit log now records every student that disappears from the list, with who/when
+  Save-before-closing:
+  - Unsaved changes are flushed when the tab is hidden/closed, and kept in a local queue
+    that is uploaded (merged with newer remote data) the next time the app opens
+  Parent portal hardening:
+  - After registering, a clear "You may now sign in" screen with a Sign In button
+  - One student can be registered on ONE email only (per school); other emails are blocked
+  - Adding a student to an existing email now requires that email's password
+  - Parent can remove (unlink) a student from their own account with a delete button
+  - Reset password now has a Confirm New Password field
   Improvements in v2.2:
   - Quiz Rankings now renders a full proclamation-style table with rank circles, medals, per-subject columns, total, avg%, and level badge
   - Print button added to Quiz Rankings page header
@@ -1595,7 +1613,10 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
         <input type="text" id="p-code-forgot" placeholder="e.g. ST001" style="text-transform:uppercase;" oninput="this.value=this.value.toUpperCase()">
       </div>
       <div class="lf" style="margin-top:.6rem;"><label>New Password</label>
-        <div class="pw-wrap"><input type="password" id="p-pass-forgot" placeholder="New password (min 6 characters)"><button class="pw-eye" type="button" onclick="togglePwField('p-pass-forgot',this)">👁</button></div>
+        <div class="pw-wrap"><input type="password" id="p-pass-forgot" placeholder="New password (min 6 characters)" autocomplete="new-password"><button class="pw-eye" type="button" onclick="togglePwField('p-pass-forgot',this)">👁</button></div>
+      </div>
+      <div class="lf" style="margin-top:.6rem;"><label>Confirm New Password</label>
+        <div class="pw-wrap"><input type="password" id="p-pass-forgot2" placeholder="Type the new password again" autocomplete="new-password"><button class="pw-eye" type="button" onclick="togglePwField('p-pass-forgot2',this)">👁</button></div>
       </div>
       <button class="lbtn" onclick="doParentForgotPw()" style="margin-top:1rem;">Reset Password →</button>
       <div style="text-align:center;margin-top:.7rem;">
@@ -1622,6 +1643,15 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
         <select id="p-school-signup" style="width:100%;padding:8px 11px;background:var(--s2);border:1px solid var(--bd);border-radius:7px;color:var(--ink);font-size:.86rem;outline:none;"></select>
       </div>
       <button class="lbtn" onclick="doParentSignup()" style="margin-top:1rem;background:var(--green);color:#0a3d2a;">Register →</button>
+    </div>
+
+    <!-- REGISTRATION COMPLETE TAB -->
+    <div id="parent-done-tab" style="display:none;text-align:center;padding:.4rem 0 .2rem;">
+      <div style="font-size:2.8rem;margin-bottom:.3rem;">🎉</div>
+      <div style="font-weight:700;font-size:1.1rem;color:var(--green);margin-bottom:.5rem;">Registration complete!</div>
+      <div id="parent-done-msg" style="font-size:.85rem;color:var(--ink2);line-height:1.6;margin-bottom:.4rem;"></div>
+      <div style="padding:9px 12px;background:rgba(62,207,142,.1);border:1px solid rgba(62,207,142,.3);border-radius:8px;font-size:.85rem;font-weight:700;color:var(--green);margin:.8rem 0;">✅ You may now sign in.</div>
+      <button class="lbtn" type="button" onclick="parentGoToSignIn()" style="background:var(--green);color:#0a3d2a;">Sign In →</button>
     </div>
 
     <div style="margin-top:.9rem;padding:.6rem 1rem;background:rgba(74,143,255,.08);border:1px solid rgba(74,143,255,.18);border-radius:8px;text-align:center;">
@@ -2104,7 +2134,7 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
             </div>
           </div>
           <div class="al info" style="margin-bottom:1rem;">
-            🌅 <strong>Morning Quiz</strong> — Weekly quiz marks out of 20 per subject. Independent from terms. Used to track daily student progress only.
+            🌅 <strong>Morning Quiz</strong> — Weekly quiz marks out of 20 per subject (P6: every 4th week of a term is a Monthly Test out of 100). Independent from terms. Used to track daily student progress only.
             <div style="margin-top:.55rem;display:flex;gap:1.2rem;flex-wrap:wrap;font-size:.72rem;color:var(--ink3);">
               <span><span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:rgba(0,214,143,.2);border:1.5px solid rgba(0,214,143,.45);font-size:.65rem;margin-right:4px;">👪</span>Parent registered — click 💬 to chat</span>
               <span><span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:rgba(255,255,255,.04);border:1.5px solid rgba(255,255,255,.1);font-size:.65rem;margin-right:4px;opacity:.4;">👤</span>No parent registered yet</span>
@@ -2123,6 +2153,14 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
               <div class="fg">
                 <label>Class</label>
                 <select id="qzCls" onchange="loadQuizTable()"><option value="">— Select Class —</option></select>
+              </div>
+              <div class="fg">
+                <label>Academic year</label>
+                <select id="qzYear" onchange="quizYearPick(this.value)"><option value="">—</option></select>
+              </div>
+              <div class="fg">
+                <label>Term</label>
+                <select id="qzTerm" onchange="quizTermPick('qz')"><option value="">—</option></select>
               </div>
               <div class="fg">
                 <label>Week</label>
@@ -2162,10 +2200,22 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
               <select id="qpCls" onchange="genQuizProcl()"><option value="">&#8212; Select Class &#8212;</option></select>
             </div>
             <div class="fg">
+              <label>Academic year</label>
+              <select id="qpYear" onchange="quizYearPick(this.value)"><option value="">—</option></select>
+            </div>
+            <div class="fg">
+              <label>Term</label>
+              <select id="qpTerm" onchange="quizTermPick('qp')"><option value="">—</option></select>
+            </div>
+            <div class="fg">
               <label>Week</label>
               <select id="qpWeek" onchange="genQuizProcl()">
                 <option value="">— Select Week —</option>
               </select>
+            </div>
+            <div class="fg">
+              <label>Week starts (Monday)</label>
+              <input type="date" id="qpWeekStart" onchange="qpSetWeekStart(this.value)">
             </div>
           </div>
         </div>
@@ -2675,10 +2725,12 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
             <button class="btn ghost" onclick="exportData()">📤 Export Backup</button>
             <button class="btn ghost" onclick="exportCSV()">📊 Export CSV</button>
             <button class="btn ghost" onclick="exportAnalyticsPDF()">📈 Analytics PDF</button>
-            <button class="btn ghost" onclick="document.getElementById('bkf').click()">📥 Import Backup</button>
+            <button class="btn ghost" onclick="document.getElementById('bkf3').click()">🔀 Merge Backup (keep new changes)</button>
+            <button class="btn ghost" onclick="document.getElementById('bkf').click()">📥 Import Backup (replace all)</button>
             <button class="btn red" onclick="clearAll()">🗑️ Clear All Data</button>
           </div>
           <input type="file" id="bkf" accept=".json" style="display:none" onchange="loadBackup(event)">
+          <input type="file" id="bkf3" accept=".json" style="display:none" onchange="mergeBackup(event)">
         </div>
       </div>
 
@@ -2695,6 +2747,9 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
             <button class="btn" onclick="showAuditLog()" style="background:var(--s2);color:var(--ink);border:1px solid var(--bd);padding:10px 22px;border-radius:9px;font-size:.88rem;font-weight:700;cursor:pointer;">
               📋 Audit Log
             </button>
+            <button class="btn" onclick="showAutoSnapshots()" style="background:var(--s2);color:var(--ink);border:1px solid var(--bd);padding:10px 22px;border-radius:9px;font-size:.88rem;font-weight:700;cursor:pointer;">
+              🕒 Auto Snapshots
+            </button>
             <button class="btn green" onclick="downloadBackup()" style="background:var(--grd-green);color:#fff;border:none;padding:10px 22px;border-radius:9px;font-size:.88rem;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;box-shadow:0 4px 16px rgba(0,214,143,.25);transition:all .18s;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 22px rgba(0,214,143,.4)'" onmouseout="this.style.transform='';this.style.boxShadow='0 4px 16px rgba(0,214,143,.25)'">
               ⬇️ Download Backup (.json)
             </button>
@@ -2704,12 +2759,14 @@ button:disabled{ opacity:.5; cursor:not-allowed!important; }
         <div class="card admin-only" style="max-width:520px;">
           <div class="ctitle" style="color:var(--red);">⚠️ Restore / Import Backup</div>
           <div style="font-size:.82rem;color:var(--ink3);margin-bottom:1rem;line-height:1.7;">
-            Import a previously downloaded backup file. <strong style="color:var(--red);">This will overwrite all current data.</strong>
+            <strong style="color:var(--green);">Merge Backup</strong> brings back anything missing (e.g. a class whose marks were lost) and keeps everything you entered after the backup was made. <strong style="color:var(--red);">Import (replace all)</strong> overwrites all current data with the file.
           </div>
           <div style="display:flex;gap:.7rem;flex-wrap:wrap;">
-            <button class="btn ghost" onclick="document.getElementById('bkf2').click()">📥 Import Backup (.json)</button>
+            <button class="btn green" onclick="document.getElementById('bkf4').click()" style="background:var(--grd-green);color:#fff;border:none;">🔀 Merge Backup (keep new changes)</button>
+            <button class="btn ghost" onclick="document.getElementById('bkf2').click()">📥 Import Backup (replace all)</button>
           </div>
           <input type="file" id="bkf2" accept=".json" style="display:none" onchange="loadBackup(event)">
+          <input type="file" id="bkf4" accept=".json" style="display:none" onchange="mergeBackup(event)">
         </div>
       </div>
 
@@ -3698,10 +3755,11 @@ function _startRealtimeSubscription(){
     .on('postgres_changes',
       { event: 'UPDATE', schema: 'public', table: 'epaza_data', filter: 'id=eq.'+key },
       function(payload){
-        // Ignore if we triggered this update ourselves (within 2s of last save)
-        if(Date.now() - _lastSaveTimestamp < 2000) return;
+        // Merge-safe: our own echo is recognised by its revision number
         if(payload.new && payload.new.data){
           _applyRemoteData(payload.new.data);
+        } else {
+          _pullRemoteIfNewer(true);   // very large documents arrive without data → fetch it
         }
       }
     )
@@ -3721,8 +3779,7 @@ function _startParentRealtimeSubscription(){
       function(payload){
         if(payload.new && payload.new.data){
           var d = payload.new.data;
-          if(d.parentChats) DB.parentChats = d.parentChats;
-          if(d.messages)    DB.messages    = d.messages;
+          _applyRemoteData(d);
           // Re-render parent chat sections
           var codes = PARENT_USER.studentCodes || [];
           codes.forEach(function(code){
@@ -3748,34 +3805,27 @@ function _stopParentRealtimeSubscription(){
 // Apply remote data diff — only update changed fields, never overwrite mid-entry marks
 var _lastSaveTimestamp = 0;
 function _applyRemoteData(d){
-  if(!d) return;
-  // Structural data: always apply (teachers, classes, subjects, students, settings…)
-  if(Array.isArray(d.users)&&d.users.length)       DB.users=d.users;
-  if(Array.isArray(d.teachers))                    DB.teachers=d.teachers;
-  if(Array.isArray(d.classes))                     DB.classes=d.classes;
-  if(Array.isArray(d.subjects))                    DB.subjects=d.subjects;
-  if(Array.isArray(d.students))                    DB.students=d.students;
-  if(d.settings&&typeof d.settings==='object')     DB.settings=Object.assign(DB.settings,d.settings);
-  if(Array.isArray(d.activity))                    DB.activity=d.activity;
-  if(Array.isArray(d.terms)&&d.terms.length)       DB.terms=d.terms;
-  if(d.approvals&&typeof d.approvals==="object")   DB.approvals=d.approvals;
-  if(d.subApprovals&&typeof d.subApprovals==="object") DB.subApprovals=d.subApprovals;
-  if(d.attendance&&typeof d.attendance==='object') DB.attendance=d.attendance;
-  if(d.remarks&&typeof d.remarks==='object')       DB.remarks=d.remarks;
-  if(Array.isArray(d.quizYears))                   DB.quizYears=d.quizYears;
-  if(Array.isArray(d.termYears))                   DB.termYears=d.termYears;
-  if(Array.isArray(d.parents))                     DB.parents=d.parents;
-  if(Array.isArray(d.messages))                    DB.messages=d.messages;
-  if(d.parentChats&&typeof d.parentChats==='object') DB.parentChats=d.parentChats;
-  // Marks: merge carefully — don't overwrite unsaved local changes
-  if(d.marks&&typeof d.marks==='object'){
-    Object.keys(d.marks).forEach(function(k){
-      if(!_pendingMarkKeys || !_pendingMarkKeys[k]) DB.marks[k]=d.marks[k];
-    });
+  if(!d || typeof d!=='object') return;
+  if(!CURRENT_SCHOOL_ID || CURRENT_SCHOOL_ID==='__super__') return;
+  var key = schoolDbKey(CURRENT_SCHOOL_ID);
+  if(_dbKeyLoaded!==key || !_syncBase[key]) return;
+  var rrev = Number(d._rev)||0;
+  if(rrev && rrev <= (Number(DB._rev)||0)) return;   // we already have this version (e.g. echo of our own save)
+  var before = _clone(DB);
+  var merged = _merge3(_syncBase[key], before, _clone(d));
+  var changed = _applyMerged(DB, before, merged);
+  DB._rev = rrev;
+  _syncBase[key] = _clone(d);
+  _persistBase(key, _syncBase[key], false);
+  if(!changed) return;
+  if(typeof PARENT_USER!=='undefined' && PARENT_USER && Array.isArray(DB.parents)){
+    var _freshPar = DB.parents.find(function(p){ return p.id===PARENT_USER.id; });
+    if(_freshPar) PARENT_USER = _freshPar;
   }
-  // Re-render active page silently
+  try{ _studSnapRefresh(); }catch(e){}
   _silentRerender();
   msgUpdateBadge();
+  try{ _warnDuplicateSids(); }catch(e){}
 }
 
 // Track which mark inputs are currently being edited
@@ -3889,6 +3939,242 @@ function _withTimeout(promise, ms){
   return Promise.race([promise, tout]);
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  CONCURRENCY-SAFE SYNC (v6)
+//  • Every save is a compare-and-swap on the document revision (_rev): the
+//    server only accepts it if nobody else saved in the meantime.
+//  • If someone did, we 3-way merge (last synced copy / ours / theirs) and retry,
+//    so people working at the same time never overwrite each other and
+//    deletions are never undone by an old copy.
+//  • A snapshot of the school data is kept once a day (10 days) for recovery.
+// ═══════════════════════════════════════════════════════════════════
+var _SESS = Math.random().toString(36).slice(2);
+var _syncBase = {};        // key → pristine copy of the document as last synced with the server
+var _dbKeyLoaded = null;   // which school key the in-memory DB currently holds
+var _rawSnap = {}, _rawFresh = {};
+var _forceOverwrite = false;
+var _writeBusy = {}, _writeDirty = {};
+
+function _clone(o){ return o===undefined ? undefined : JSON.parse(JSON.stringify(o)); }
+function _isObj(x){ return x!==null && typeof x==='object' && !Array.isArray(x); }
+function _deq(a,b){
+  if(a===b) return true;
+  if(a===null || b===null || typeof a!=='object' || typeof b!=='object') return false;
+  var aa=Array.isArray(a), ba=Array.isArray(b);
+  if(aa!==ba) return false;
+  if(aa){
+    if(a.length!==b.length) return false;
+    for(var i=0;i<a.length;i++) if(!_deq(a[i],b[i])) return false;
+    return true;
+  }
+  var ka=Object.keys(a), kb=Object.keys(b);
+  if(ka.length!==kb.length) return false;
+  for(var j=0;j<ka.length;j++){
+    var k=ka[j];
+    if(!Object.prototype.hasOwnProperty.call(b,k) || !_deq(a[k],b[k])) return false;
+  }
+  return true;
+}
+function _idArr(a){ return Array.isArray(a) && a.every(function(x){ return _isObj(x) && x.id!==undefined && x.id!==null; }); }
+function _primArr(a){
+  if(!Array.isArray(a)) return false;
+  var seen={};
+  return a.every(function(x){
+    if(typeof x!=='string' && typeof x!=='number') return false;
+    var k=typeof x+':'+x; if(seen[k]) return false; seen[k]=1; return true;
+  });
+}
+function _mergeIdArrays(b,l,r){
+  var bm={}, lm={}, rm={};
+  b.forEach(function(x){ bm[String(x.id)]=x; });
+  l.forEach(function(x){ lm[String(x.id)]=x; });
+  r.forEach(function(x){ rm[String(x.id)]=x; });
+  var out=[], seen={};
+  function emit(id){
+    if(seen[id]) return; seen[id]=1;
+    var v=_merge3(bm[id], lm[id], rm[id]);
+    if(v!==undefined) out.push(v);
+  }
+  r.forEach(function(x){ emit(String(x.id)); });   // their order first
+  l.forEach(function(x){ emit(String(x.id)); });   // then what only we have
+  return out;
+}
+function _mergePrimArrays(b,l,r){
+  var inL={}, inR={}, removed={};
+  l.forEach(function(x){ inL[typeof x+':'+x]=1; });
+  r.forEach(function(x){ inR[typeof x+':'+x]=1; });
+  b.forEach(function(x){ var k=typeof x+':'+x; if(!inL[k] || !inR[k]) removed[k]=1; });
+  var out=[], seen={};
+  r.concat(l).forEach(function(x){
+    var k=typeof x+':'+x;
+    if(seen[k] || removed[k]) return;
+    seen[k]=1; out.push(x);
+  });
+  return out;
+}
+// 3-way merge: b = last synced copy, l = ours, r = theirs. undefined = "not present".
+function _merge3(b,l,r){
+  if(_deq(l,r)) return l;
+  if(_deq(l,b)) return r;      // we did not change it → take theirs
+  if(_deq(r,b)) return l;      // they did not change it → keep ours
+  if(l===undefined) return r;  // we deleted it but they changed it → keep their change
+  if(r===undefined) return l;  // they deleted it but we changed it → keep our change
+  if(_isObj(l) && _isObj(r)){
+    var bb=_isObj(b)?b:{}, out={}, seen={};
+    Object.keys(r).concat(Object.keys(l)).forEach(function(k){
+      if(seen[k]) return; seen[k]=1;
+      var v=_merge3(bb[k], l[k], r[k]);
+      if(v!==undefined) out[k]=v;
+    });
+    return out;
+  }
+  if(Array.isArray(l) && Array.isArray(r)){
+    var ba=Array.isArray(b)?b:[];
+    if(_idArr(l) && _idArr(r) && _idArr(ba)) return _mergeIdArrays(ba,l,r);
+    if(_primArr(l) && _primArr(r) && _primArr(ba)) return _mergePrimArrays(ba,l,r);
+  }
+  return l;                    // both changed the same value → ours (latest edit) wins
+}
+// Put merged top-level sections into target, only touching sections that really changed
+function _applyMerged(target, before, merged){
+  var changed=false;
+  Object.keys(merged||{}).forEach(function(k){
+    if(k==='_rev') return;
+    if(!_deq(merged[k], before[k])){ target[k]=merged[k]; changed=true; }
+  });
+  return changed;
+}
+function _fallbackMerge(local, remote){
+  try{
+    _mergeRemoteIntoLocal(local, remote, false);
+    local.audit = _unionById(local.audit, remote.audit);
+  }catch(e){}
+  return local;
+}
+
+var _basePersistAt = {};
+function _persistBase(key, doc, force){
+  try{
+    if(!doc) return;
+    if(!force && Date.now()-(_basePersistAt[key]||0) < 3000) return;
+    _basePersistAt[key] = Date.now();
+    localStorage.setItem('scorix_base_'+key, JSON.stringify(doc));
+  }catch(e){}
+}
+function _loadPersistedBase(key){
+  try{ var t=localStorage.getItem('scorix_base_'+key); return t ? JSON.parse(t) : undefined; }catch(e){ return undefined; }
+}
+
+function _casUpdate(key, toSend, expected){
+  var q = supabaseClient.from('epaza_data').update({data:toSend}).eq('id',key);
+  q = expected ? q.eq('data->>_rev', String(expected)) : q.is('data->>_rev', null);
+  return _withTimeout(q.select('id'), 30000).then(function(res){
+    if(res && res.error) throw res.error;
+    return !!(res && Array.isArray(res.data) && res.data.length);
+  });
+}
+async function _fetchRemote(key){
+  var r = await _withTimeout(supabaseClient.from('epaza_data').select('data').eq('id',key).maybeSingle(), 30000);
+  if(r && r.error) throw r.error;
+  return { exists: !!(r && r.data), doc: (r && r.data && r.data.data) || null };
+}
+
+// Once a day, keep the state the server had BEFORE our first save as a recovery snapshot
+async function _dailySnapshot(key, doc){
+  try{
+    if(!doc || key.indexOf('epaza_school_')!==0) return;
+    var day=new Date().toISOString().slice(0,10);
+    var flag='scorix_snap_'+key;
+    if(localStorage.getItem(flag)===day) return;
+    var sc=key.replace('epaza_school_','');
+    var r=await supabaseClient.from('epaza_data').upsert({id:'epaza_snap_'+sc+'_'+day, data:doc}, {ignoreDuplicates:true});
+    if(r && r.error) return;
+    localStorage.setItem(flag, day);
+    for(var i=11;i<=14;i++){
+      var od=new Date(Date.now()-i*864e5).toISOString().slice(0,10);
+      supabaseClient.from('epaza_data').delete().eq('id','epaza_snap_'+sc+'_'+od).then(function(){},function(){});
+    }
+  }catch(e){}
+}
+
+// Save a school document safely. data = live DB (opts.live) or a stored copy.
+async function _casWrite(key, data, opts){
+  opts = opts || {};
+  var live = !!opts.live;
+  var base = live ? _syncBase[key] : opts.base;
+  var forced = !!opts.force;
+  var mergedAny = false;
+  for(var attempt=0; attempt<12; attempt++){
+    if(Array.isArray(data.audit) && data.audit.length>1000) data.audit.splice(0, data.audit.length-1000);
+    var expected = Number(data._rev)||0;
+    var toSend = _clone(data);
+    toSend._rev = expected+1;
+    var ok = false;
+    if(forced){
+      // restore: unconditional overwrite, with a revision above whatever is on the server
+      var cur = await _fetchRemote(key);
+      var rr0 = Number(cur.doc && cur.doc._rev)||0;
+      toSend._rev = Math.max(rr0, expected)+1;
+      var up = await _withTimeout(supabaseClient.from('epaza_data').upsert({id:key, data:toSend}), 30000);
+      if(up && up.error) throw up.error;
+      ok = true;
+    } else {
+      ok = await _casUpdate(key, toSend, expected);
+    }
+    if(!ok){
+      var rem = await _fetchRemote(key);
+      if(!rem.exists){
+        var ins = await supabaseClient.from('epaza_data').insert({id:key, data:toSend});
+        if(!ins.error) ok = true;
+        else if(ins.error.code!=='23505') throw ins.error;
+      } else {
+        var remote = rem.doc || {};
+        var before = _clone(data);
+        var merged = base ? _merge3(base, before, remote) : _fallbackMerge(_clone(data), remote);
+        if(_applyMerged(data, before, merged)) mergedAny = true;
+        data._rev = Number(remote._rev)||0;
+        base = _clone(remote);
+        if(opts.holder) opts.holder.base = base;
+        if(live) _syncBase[key] = base;
+        await new Promise(function(res){ setTimeout(res, 60+Math.random()*(150+attempt*120)); });
+        continue;
+      }
+    }
+    if(ok){
+      var prev = live ? _syncBase[key] : base;
+      data._rev = toSend._rev;
+      if(live){ _syncBase[key] = toSend; _persistBase(key, toSend, false); _dailySnapshot(key, prev); }
+      if(mergedAny){
+        try{ _secToast('Another user saved at the same time. Their changes were merged with yours.'); }catch(e){}
+        try{ _silentRerender(); msgUpdateBadge(); }catch(e){}
+        try{ _warnDuplicateSids(); }catch(e){}
+      }
+      return;
+    }
+  }
+  throw new Error('too_many_conflicts');
+}
+
+// Pull newer server data (3-way merged into what is on screen)
+var _lastRevCheck = 0;
+async function _pullRemoteIfNewer(force){
+  try{
+    if(!CURRENT_SCHOOL_ID || CURRENT_SCHOOL_ID==='__super__' || !_isOnline) return;
+    var key = schoolDbKey(CURRENT_SCHOOL_ID);
+    if(_dbKeyLoaded!==key || _writeBusy[key]) return;
+    if(!force && Date.now()-_lastRevCheck < 25000) return;
+    _lastRevCheck = Date.now();
+    var r = await _withTimeout(supabaseClient.from('epaza_data').select('rev:data->_rev').eq('id',key).maybeSingle(), 8000);
+    var rr = Number(r && r.data && r.data.rev)||0;
+    if(rr > (Number(DB._rev)||0)){
+      var f = await _fetchRemote(key);
+      if(f.doc) _applyRemoteData(f.doc);
+    }
+  }catch(e){}
+}
+document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='visible') _pullRemoteIfNewer(true); });
+window.addEventListener('online', function(){ _pullRemoteIfNewer(true); });
+
 // Offline queue — saves that failed get stored and retried automatically
 var _offlineQueue = [];
 var _draining     = false;
@@ -3898,9 +4184,9 @@ window.addEventListener('online',  function(){ _isOnline=true;  _drainQueue(); }
 window.addEventListener('offline', function(){ _isOnline=false; });
 
 function _enqueueWrite(key, data){
-  // Remove any pending write for same key (superseded)
-  _offlineQueue = _offlineQueue.filter(function(q){ return q.key!==key; });
-  _offlineQueue.push({key:key, data:data, ts:Date.now()});
+  // Replace an older entry of THIS session for the same key (entries from a previous session are kept)
+  _offlineQueue = _offlineQueue.filter(function(q){ return !(q.key===key && q.sess===_SESS); });
+  _offlineQueue.push({key:key, data:data, ts:Date.now(), sess:_SESS});
   // Always persist queue to localStorage so it survives page refresh
   try{ localStorage.setItem('scorix_offq', JSON.stringify(_offlineQueue)); }catch(e){}
 }
@@ -3910,36 +4196,72 @@ function _loadOfflineQueue(){
     var raw = localStorage.getItem('scorix_offq');
     if(raw) _offlineQueue = JSON.parse(raw)||[];
   }catch(e){ _offlineQueue=[]; }
+  // Recover work that was saved on this device but never reached the server (tab/browser killed)
+  try{
+    var have={}; _offlineQueue.forEach(function(q){ have[q.key]=1; });
+    var pre='scorix_dirty_', rm=[];
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i);
+      if(k && k.indexOf(pre)===0){
+        var dk=k.slice(pre.length);
+        rm.push(k);
+        if(have[dk]) continue;
+        var doc=localStorage.getItem(dk);
+        if(doc){ try{ _offlineQueue.push({key:dk, data:JSON.parse(doc), ts:Date.now(), sess:'recovered'}); }catch(e){} }
+      }
+    }
+    if(rm.length){
+      rm.forEach(function(k){ localStorage.removeItem(k); });
+      localStorage.setItem('scorix_offq', JSON.stringify(_offlineQueue));
+    }
+  }catch(e){}
 }
 
 async function _drainQueue(){
   if(_draining || !_isOnline || !_offlineQueue.length) return;
   _draining = true;
-  var remaining = [];
-  for(var i=0;i<_offlineQueue.length;i++){
-    var item = _offlineQueue[i];
+  var snap = _offlineQueue.slice().sort(function(x,y){ return (x.ts||0)-(y.ts||0); });
+  var failed = [];
+  for(var i=0;i<snap.length;i++){
+    var item = snap[i];
     try{
-      await _withTimeout(
-        supabaseClient.from('epaza_data').upsert({id:item.key, data:item.data}),
-        5000
-      );
-      // success — don't keep it
+      if(String(item.key).indexOf('epaza_school_')===0){
+        var live = (item.data===DB && _dbKeyLoaded===item.key);
+        if(live){
+          await _flushWrite(item.key, item.data);   // same one-at-a-time path as normal saves
+        } else {
+          await _casWrite(item.key, item.data, {base:_loadPersistedBase(item.key)});
+          if(!_pendingWrites[item.key]){ try{ localStorage.removeItem('scorix_dirty_'+item.key); }catch(e){} }
+        }
+      } else {
+        await _withTimeout(supabaseClient.from('epaza_data').upsert({id:item.key, data:item.data}), 8000);
+      }
     }catch(e){
-      remaining.push(item); // keep for next drain
+      failed.push(item); // keep for next drain
     }
   }
-  _offlineQueue = remaining;
+  // Keep anything that was queued while we were uploading
+  var added = _offlineQueue.filter(function(q){ return snap.indexOf(q)<0; });
+  var merged = failed.concat(added), byKey = {};
+  merged.forEach(function(q){
+    var kk = q.key+'|'+(q.sess||'');
+    if(!byKey[kk] || (q.ts||0) >= (byKey[kk].ts||0)) byKey[kk] = q;
+  });
+  _offlineQueue = Object.keys(byKey).map(function(k){ return byKey[k]; });
   try{ localStorage.setItem('scorix_offq', JSON.stringify(_offlineQueue)); }catch(e){}
   _draining = false;
 }
 
 // Deduplicated write — merges rapid saves into one network call
 var _pendingWrites = {}; // key → {data, timer}
+var _inflightWrites = {}; // key → data currently being uploaded
 var WRITE_DEBOUNCE = 250; // ms — faster than 400ms for snappier saves
 
 function _scheduleWrite(key, data){
   // Always update local cache immediately — instant for offline reads
   try{ localStorage.setItem(key, JSON.stringify(data)); }catch(e){}
+  // Mark "not yet on the server" so the work can be recovered if the tab/browser is killed
+  if(key.indexOf('epaza_school_')===0){ try{ localStorage.setItem('scorix_dirty_'+key, String(Date.now())); }catch(e){} }
 
   if(_pendingWrites[key]) clearTimeout(_pendingWrites[key].timer);
   _pendingWrites[key] = {
@@ -3953,39 +4275,101 @@ function _scheduleWrite(key, data){
 }
 
 async function _flushWrite(key, data){
+  var isSchool = key.indexOf('epaza_school_')===0;
   if(!_isOnline){
     _enqueueWrite(key, data);
     showSyncStatus('offline');
     return;
   }
-  showSyncStatus('saving');
-  _lastSaveTimestamp = Date.now(); // tell realtime to ignore our own echo
+  if(!isSchool){
+    // Other documents (super admin, user index): plain upsert
+    showSyncStatus('saving');
+    _lastSaveTimestamp = Date.now();
+    _inflightWrites[key] = data;
+    try{
+      await _withRetry(function(){
+        return _withTimeout(supabaseClient.from('epaza_data').upsert({id:key, data:data}), 8000);
+      }, 3, 'write:'+key);
+      delete _inflightWrites[key];
+      _offlineQueue = _offlineQueue.filter(function(q){ return !(q.key===key && q.data===data); });
+      try{ localStorage.setItem('scorix_offq', JSON.stringify(_offlineQueue)); }catch(e){}
+      showSyncStatus('saved');
+      _drainQueue();
+    }catch(e){
+      delete _inflightWrites[key];
+      _enqueueWrite(key, data);
+      setTimeout(function(){ try{ _drainQueue(); }catch(_e){} }, 15000);
+      showSyncStatus('error');
+    }
+    return;
+  }
+  // School data: one save at a time per school; newer requests are folded into the next round
+  if(_writeBusy[key]){ _writeDirty[key] = data; return; }
+  _writeBusy[key] = true;
   try{
-    // Reconcile against any newer remote save before overwriting a school's data document
-    if(key.indexOf('epaza_school_')===0){ data = await _reconcileBeforeWrite(key, data); }
-    await _withRetry(function(){
-      return _withTimeout(
-        supabaseClient.from('epaza_data').upsert({id:key, data:data}),
-        4000  // reduced from 5000ms for faster failure detection
-      );
-    }, 3, 'write:'+key);
-    showSyncStatus('saved');
-    _clearPendingKeys(); // marks are safely persisted — realtime can merge again
-    // Drain any queued writes now we know we're online
-    _drainQueue();
-  }catch(e){
-    // Network failed — queue for later
-    _enqueueWrite(key, data);
-    showSyncStatus('error');
-    console.warn('[SCORIX] Write failed, queued:', key);
+    var again;
+    do{
+      again = false;
+      _writeDirty[key] = null;
+      showSyncStatus('saving');
+      _lastSaveTimestamp = Date.now();
+      _inflightWrites[key] = data;
+      var live = (data===DB && _dbKeyLoaded===key);
+      var force = _forceOverwrite; _forceOverwrite = false;
+      try{
+        await _casWrite(key, data, live ? {live:true, force:force} : {base:_loadPersistedBase(key), force:force});
+        delete _inflightWrites[key];
+        // everything this session queued for this school is now on the server
+        _offlineQueue = _offlineQueue.filter(function(q){ return !(q.key===key && q.sess===_SESS); });
+        try{ localStorage.setItem('scorix_offq', JSON.stringify(_offlineQueue)); }catch(e){}
+        if(!_pendingWrites[key]){ try{ localStorage.removeItem('scorix_dirty_'+key); }catch(e){} }
+        showSyncStatus('saved');
+        _clearPendingKeys();
+        _drainQueue();
+      }catch(e){
+        delete _inflightWrites[key];
+        _enqueueWrite(key, data);
+        setTimeout(function(){ try{ _drainQueue(); }catch(_e){} }, 15000+Math.random()*5000);
+        showSyncStatus('error');
+        console.warn('[SCORIX] Write failed, queued:', key, e && e.message);
+        break;
+      }
+      if(_writeDirty[key]){ data = _writeDirty[key]; again = true; }
+    } while(again);
+  } finally {
+    _writeBusy[key] = false;
   }
 }
+
+// ── Save before closing / leaving the tab ──
+// Anything still waiting in the debounce timer, or mid-upload, is copied to the
+// local queue (survives the tab closing) and an upload is attempted right away.
+// If the tab dies before the upload finishes, the queue is uploaded on next open.
+function _flushOnClose(){
+  try{
+    var keys = {};
+    Object.keys(_pendingWrites).forEach(function(k){ keys[k] = _pendingWrites[k] ? _pendingWrites[k].data : null; });
+    Object.keys(_inflightWrites).forEach(function(k){ if(!(k in keys)) keys[k] = _inflightWrites[k]; });
+    var any = false;
+    Object.keys(keys).forEach(function(k){
+      var d = keys[k]; if(!d) return;
+      if(_pendingWrites[k]){ clearTimeout(_pendingWrites[k].timer); delete _pendingWrites[k]; }
+      try{ if(_syncBase[k]) _persistBase(k, _syncBase[k], true); }catch(e){}
+      _enqueueWrite(k, d);
+      any = true;
+    });
+    if(any && _isOnline) _drainQueue();
+  }catch(e){}
+}
+document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='hidden') _flushOnClose(); });
+window.addEventListener('pagehide', _flushOnClose);
+window.addEventListener('beforeunload', _flushOnClose);
 
 // In-memory read cache — avoids repeated Supabase round-trips for same key in same session
 var _readCache = {};
 var _readCacheTTL = 8000; // 8 seconds — data is fresh enough from realtime
 
-async function _resilientRead(key, timeoutMs){
+async function _resilientReadRaw(key, timeoutMs){
   timeoutMs = timeoutMs || 4000; // reduced from 5000ms
 
   // 0. In-memory cache hit (fastest — zero network)
@@ -4020,6 +4404,24 @@ async function _resilientRead(key, timeoutMs){
     }
   }catch(e){}
   return null;
+}
+
+// School documents: keep the in-memory read cache pristine (never shared with the live DB)
+async function _resilientRead(key, timeoutMs){
+  var before = _readCache[key];
+  var doc = await _resilientReadRaw(key, timeoutMs);
+  try{
+    if(doc && key.indexOf('epaza_school_')===0){
+      if(before && _readCache[key]===before){
+        return _clone(before.data);                 // cache hit → hand out a copy
+      }
+      if(_readCache[key]){
+        _rawSnap[key] = _clone(doc); _rawFresh[key] = true;
+        _readCache[key].data = _rawSnap[key];       // cache keeps the pristine copy; DB gets the original
+      }
+    }
+  }catch(e){}
+  return doc;
 }
 
 // Invalidate cache for a key after we save it
@@ -4110,18 +4512,8 @@ function pwStrengthError(pw){
 }
 
 // ── Login throttle (per device; slows guessing, does not replace server-side limits) ──
-function _loginThrottleCheck(){
-  try{ var t=JSON.parse(localStorage.getItem('scorix_lt')||'{}'); if(t.until && t.until>Date.now()) return t.until-Date.now(); }catch(e){}
-  return 0;
-}
-function _loginThrottleFail(){
-  try{
-    var now=Date.now(), t=JSON.parse(localStorage.getItem('scorix_lt')||'{}');
-    if(!t.first || now-t.first>600000) t={n:1, first:now}; else t.n=(t.n||0)+1;
-    if(t.n>=5) t.until = now+Math.min(300000, 30000*Math.pow(2,t.n-5));
-    localStorage.setItem('scorix_lt', JSON.stringify(t));
-  }catch(e){}
-}
+function _loginThrottleCheck(){ return 0; }   // no waiting after wrong password
+function _loginThrottleFail(){}
 function _loginThrottleReset(){ try{ localStorage.removeItem('scorix_lt'); }catch(e){} }
 
 // ── Small modal helper ──
@@ -4225,7 +4617,20 @@ function auditLog(action, detail){
   }catch(e){}
 }
 var _marksSnap = null;
-function _auditSnapshot(){ try{ _marksSnap = Object.assign({}, (DB&&DB.marks)||{}); }catch(e){ _marksSnap=null; } }
+function _auditSnapshot(){ try{ _marksSnap = Object.assign({}, (DB&&DB.marks)||{}); }catch(e){ _marksSnap=null; } try{ _studSnapRefresh(); }catch(e){} }
+var _studSnap = null;
+function _studSnapRefresh(){
+  try{ _studSnap = {}; (DB.students||[]).forEach(function(st){ if(st && st.id) _studSnap[st.id] = (st.name||'')+' ['+(st.sid||'')+']'; }); }
+  catch(e){ _studSnap = null; }
+}
+function _auditStudentsDiff(){
+  if(!_studSnap || !DB || !Array.isArray(DB.students) || !ME) return;
+  var cur = {}; DB.students.forEach(function(st){ if(st && st.id) cur[st.id] = true; });
+  Object.keys(_studSnap).forEach(function(id){
+    if(!cur[id]) auditLog('student-removed', _studSnap[id]+' no longer in the student list');
+  });
+  _studSnapRefresh();
+}
 function _auditMarksDiff(){
   if(!_marksSnap || !DB || !DB.marks || !ME) return;
   var cur=DB.marks, ch=[];
@@ -4239,6 +4644,43 @@ function _auditMarksDiff(){
   }
   _marksSnap = Object.assign({}, cur);
 }
+// ── Automatic daily snapshots (last 10 days) ──
+async function showAutoSnapshots(){
+  if(!isAdmin() || !CURRENT_SCHOOL_ID) return;
+  var days=[]; for(var i=0;i<10;i++) days.push(new Date(Date.now()-i*864e5).toISOString().slice(0,10));
+  var pre='epaza_snap_'+CURRENT_SCHOOL_ID+'_';
+  var have={};
+  try{
+    var r=await supabaseClient.from('epaza_data').select('id').in('id', days.map(function(d){ return pre+d; }));
+    ((r&&r.data)||[]).forEach(function(x){ have[x.id]=1; });
+  }catch(e){ alert('Could not load snapshots. Check your connection.'); return; }
+  var list=days.filter(function(d){ return have[pre+d]; });
+  var old=document.getElementById('snapOverlay'); if(old) old.remove();
+  var ov=document.createElement('div'); ov.id='snapOverlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem;';
+  ov.innerHTML='<div style="background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:1.2rem;max-width:420px;width:100%;max-height:80vh;overflow:auto;">'
+    +'<div style="font-weight:700;font-size:1rem;margin-bottom:.4rem;">🕒 Automatic Snapshots</div>'
+    +'<div style="font-size:.78rem;color:var(--ink3);line-height:1.6;margin-bottom:.8rem;">The system saves a copy of your school data once a day and keeps it for 10 days. Download one, then use <strong>Merge Backup (keep new changes)</strong> to bring back anything that was lost.</div>'
+    +(list.length?list.map(function(d){ return '<div style="display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid var(--bd);"><span style="font-size:.85rem;">'+d+'</span><button class="btn" onclick="downloadSnapshot(\''+d+'\')" style="padding:6px 14px;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;">⬇️ Download</button></div>'; }).join('')
+      :'<div style="font-size:.85rem;color:var(--ink3);padding:.6rem 0;">No snapshots yet. The first one is created the next time data is saved.</div>')
+    +'<button class="btn" onclick="document.getElementById(\'snapOverlay\').remove()" style="margin-top:1rem;width:100%;padding:9px;border-radius:9px;font-weight:700;cursor:pointer;">Close</button></div>';
+  document.body.appendChild(ov);
+}
+async function downloadSnapshot(day){
+  try{
+    var r=await supabaseClient.from('epaza_data').select('data').eq('id','epaza_snap_'+CURRENT_SCHOOL_ID+'_'+day).maybeSingle();
+    var doc=r&&r.data&&r.data.data;
+    if(!doc){ alert('Snapshot not found.'); return; }
+    var copy=JSON.parse(JSON.stringify(doc));
+    ['users','teachers','parents'].forEach(function(k){ (copy[k]||[]).forEach(function(x){ if(x && x.password) x.password='[hidden]'; }); });
+    var out={_backup_info:{school:(copy.settings&&copy.settings.schoolName)||'', generated:new Date().toISOString(), source:'auto-snapshot '+day}, data:copy};
+    var blob=new Blob([JSON.stringify(out)],{type:'application/json'});
+    var a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download='scorix_snapshot_'+day+'.json'; document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
+  }catch(e){ alert('Could not download the snapshot.'); }
+}
+
 function showAuditLog(){
   if(!isAdmin()){ return; }
   var arr=(_auditStore()||[]).slice().sort(function(a,b){ return a.t<b.t?1:-1; });
@@ -4344,26 +4786,29 @@ function _mergeRemoteIntoLocal(local, remote, nested){
   });
 }
 async function _reconcileBeforeWrite(key, data){
-  try{
-    var r = await _withTimeout(supabaseClient.from('epaza_data').select('rev:data->_rev').eq('id',key).maybeSingle(), 4000);
-    if(r && r.error) throw r.error;
-    var remoteRev = Number(r && r.data && r.data.rev) || 0;
-    var localBase = Number(data._rev) || 0;
-    if(remoteRev > localBase){
-      var full = await _withTimeout(supabaseClient.from('epaza_data').select('data').eq('id',key).single(), 8000);
-      var rd = full && full.data && full.data.data;
-      if(rd){
-        _mergeRemoteIntoLocal(data, rd, false);
-        data.audit = _unionById(data.audit, rd.audit);
-        remoteRev = Math.max(remoteRev, Number(rd._rev)||0);
-        _secToast('Another user saved changes at the same time. Their changes were merged with yours.');
-        try{ _silentRerender(); }catch(e){}
-      }
-    }
-    data._rev = Math.max(remoteRev, localBase) + 1;
-  }catch(e){
-    data._rev = (Number(data._rev)||0) + 1;
+  var remoteRev = 0, rd = null;
+  // 1) Ask the server what version it has. If this fails we must NOT overwrite the server
+  //    with a possibly-old local copy — throw so the save is queued and retried.
+  var r = await _withTimeout(supabaseClient.from('epaza_data').select('rev:data->_rev').eq('id',key).maybeSingle(), 10000);
+  if(r && r.error) throw r.error;
+  remoteRev = Number(r && r.data && r.data.rev) || 0;
+  var localBase = Number(data._rev) || 0;
+  if(remoteRev > localBase){
+    var full = await _withTimeout(supabaseClient.from('epaza_data').select('data').eq('id',key).single(), 15000);
+    if(full && full.error) throw full.error;
+    rd = full && full.data && full.data.data;
   }
+  // 2) Merge newer server data into ours (never lets this step block a save)
+  try{
+    if(rd){
+      _mergeRemoteIntoLocal(data, rd, false);
+      data.audit = _unionById(data.audit, rd.audit);
+      remoteRev = Math.max(remoteRev, Number(rd._rev)||0);
+      _secToast('Another user saved changes at the same time. Their changes were merged with yours.');
+      try{ _silentRerender(); }catch(e){}
+    }
+  }catch(e){}
+  data._rev = Math.max(remoteRev, localBase) + 1;
   return data;
 }
 
@@ -4482,7 +4927,48 @@ async function _syncUserIndexEntry(schoolId, users){
   _scheduleWrite('epaza_users', merged);
 }
 
+var _HANDLED_KEYS = {users:1,teachers:1,classes:1,subjects:1,students:1,marks:1,settings:1,activity:1,terms:1,approvals:1,subApprovals:1,attendance:1,remarks:1,quizYears:1,termYears:1,parents:1,messages:1,parentChats:1,quizVisibility:1,_rev:1};
+// Loads a school; when the school is already open, unsaved local edits are merged back in (never discarded)
 async function supabaseLoad(sid){
+  var key = schoolDbKey(sid);
+  var had = (_dbKeyLoaded===key) && !!_syncBase[key];
+  var localBefore = had ? _clone(DB) : null;
+  _rawFresh[key] = false;
+  var res = await _supabaseLoadRaw(sid);
+  try{
+    var fresh = !!_rawFresh[key]; _rawFresh[key] = false;
+    var raw = _rawSnap[key] || null;
+    if(had){
+      var afterRaw = _clone(DB);
+      if(fresh && raw){
+        var remoteNow = _clone(DB);
+        Object.keys(raw).forEach(function(k){ if(!_HANDLED_KEYS[k]) remoteNow[k]=_clone(raw[k]); });
+        var merged = _merge3(_syncBase[key], localBefore, remoteNow);
+        _applyMerged(DB, afterRaw, merged);
+        _syncBase[key] = raw;
+        DB._rev = Number(raw._rev)||0;
+        _persistBase(key, raw, true);
+        try{ localStorage.setItem(key, JSON.stringify(DB)); }catch(e){}
+      } else {
+        _applyMerged(DB, afterRaw, localBefore);   // nothing new from the server: keep exactly what we had
+      }
+    } else {
+      DB.audit = Array.isArray(raw && raw.audit) ? _clone(raw.audit) : [];
+      if(raw){
+        Object.keys(raw).forEach(function(k){ if(!_HANDLED_KEYS[k]) DB[k]=_clone(raw[k]); });
+        DB._rev = Number(raw._rev)||0;
+        _syncBase[key] = raw;
+      } else {
+        _syncBase[key] = {};
+        DB._rev = 0;
+      }
+      _dbKeyLoaded = key;
+      _persistBase(key, _syncBase[key], true);
+    }
+  }catch(e){ console.warn('[SCORIX] sync base error', e); }
+  return res;
+}
+async function _supabaseLoadRaw(sid){
   var key = schoolDbKey(sid);
   var d = await _resilientRead(key, 4000);
   if(d){
@@ -4646,6 +5132,7 @@ function purgeOldParentMessages(){
 function dbSave(){
   if(!CURRENT_SCHOOL_ID) return;
   try{ _auditMarksDiff(); }catch(e){}
+  try{ _auditStudentsDiff(); }catch(e){}
   // Block saves if school is paused (except superadmin)
   if(isSuperAdmin()) { _doSave(); return; }
   var school=SUPERDB.schools.find(function(s){return s.id===CURRENT_SCHOOL_ID;});
@@ -4775,6 +5262,8 @@ function switchParentTab(tab){
   var loginTab  = document.getElementById('parent-login-tab');
   var signupTab = document.getElementById('parent-signup-tab');
   var forgotTab = document.getElementById('parent-forgot-tab');
+  var doneTab   = document.getElementById('parent-done-tab');
+  if(doneTab) doneTab.style.display = (tab === 'done') ? '' : 'none';
   var loginBtn  = document.getElementById('ptab-login');
   var signupBtn = document.getElementById('ptab-signup');
   if(tab === 'login'){
@@ -4793,6 +5282,10 @@ function switchParentTab(tab){
     if(loginTab)  loginTab.style.display  = 'none';
     if(signupTab) signupTab.style.display = 'none';
     if(forgotTab) forgotTab.style.display = '';
+  } else if(tab === 'done'){
+    if(loginTab)  loginTab.style.display  = 'none';
+    if(signupTab) signupTab.style.display = 'none';
+    if(forgotTab) forgotTab.style.display = 'none';
   }
   // Clear errors
   var le = document.getElementById('parent-lerr'); if(le) le.style.display='none';
@@ -4811,6 +5304,8 @@ function openParentForgotPw(){
   var loginEmailEl = document.getElementById('p-email-login');
   var forgotEmailEl = document.getElementById('p-email-forgot');
   if(loginEmailEl && forgotEmailEl && loginEmailEl.value) forgotEmailEl.value = loginEmailEl.value;
+  var _fp1 = document.getElementById('p-pass-forgot');  if(_fp1) _fp1.value = '';
+  var _fp2 = document.getElementById('p-pass-forgot2'); if(_fp2) _fp2.value = '';
   switchParentTab('forgot');
 }
 function closeParentForgotPw(){
@@ -4821,6 +5316,7 @@ async function doParentForgotPw(){
   var email    = (document.getElementById('p-email-forgot').value||'').trim().toLowerCase();
   var code     = (document.getElementById('p-code-forgot').value||'').trim().toUpperCase();
   var newPass  = document.getElementById('p-pass-forgot').value;
+  var newPass2 = (document.getElementById('p-pass-forgot2')||{}).value || '';
   var errEl = document.getElementById('parent-frerr');
   var okEl  = document.getElementById('parent-frok');
   function fErr(msg){ errEl.textContent='❌ '+msg; errEl.style.display='flex'; okEl.style.display='none'; }
@@ -4829,10 +5325,13 @@ async function doParentForgotPw(){
   if(!schoolId){ fErr('Please select your school.'); return; }
   if(!email || !code || !newPass){ fErr('Please fill in all fields.'); return; }
   if(newPass.length < 6){ fErr('New password must be at least 6 characters.'); return; }
+  if(!newPass2){ fErr('Please confirm your new password.'); return; }
+  if(newPass !== newPass2){ fErr('The two passwords do not match. Please type the same password in both fields.'); return; }
 
   var btn = document.querySelector('#parent-forgot-tab .lbtn');
   if(btn){ btn.disabled=true; btn.textContent='Verifying…'; }
   try{
+    try{ _invalidateReadCache(schoolDbKey(schoolId)); }catch(_e){}
     await supabaseLoad(schoolId);
     if(!DB.parents) DB.parents=[];
     var parent = DB.parents.find(function(p){ return p.email===email; });
@@ -4848,6 +5347,8 @@ async function doParentForgotPw(){
     auditLog('password-reset','parent self-reset: '+email);
     dbSave();
     fOk('Password reset! You can now sign in with your new password.');
+    document.getElementById('p-pass-forgot').value = '';
+    document.getElementById('p-pass-forgot2').value = '';
     setTimeout(function(){
       switchParentTab('login');
       document.getElementById('p-email-login').value = email;
@@ -4861,6 +5362,51 @@ async function doParentForgotPw(){
   }
 }
 
+// ── Parent helpers: one student = one email ──
+function _maskEmail(e){
+  e = String(e||''); var i = e.indexOf('@');
+  if(i < 1) return '***';
+  return e.slice(0, Math.min(2, i)) + '***' + e.slice(i);
+}
+// Returns the parent account (other than exceptId) that already holds this student code, or null.
+function _parentOwningCode(code, exceptId){
+  code = String(code||'').toUpperCase();
+  return (DB.parents||[]).find(function(p){
+    return p.id !== exceptId && Array.isArray(p.studentCodes) &&
+      p.studentCodes.some(function(c){ return String(c).toUpperCase() === code; });
+  }) || null;
+}
+async function _parentFreshLoad(schoolId){
+  try{ _invalidateReadCache(schoolDbKey(schoolId)); }catch(e){}
+  await supabaseLoad(schoolId);
+  if(!DB.parents) DB.parents = [];
+}
+function _parentTakenMsg(owner, studentName){
+  return 'Student "'+studentName+'" is already registered on another email ('+_maskEmail(owner.email)+'). '
+    + 'A student can be registered on one email only. That parent can remove the student from their account, '
+    + 'or please contact the school.';
+}
+
+// ── Registration complete screen ──
+function _parentRegDone(email, schoolId, studentName, addedToExisting){
+  window._parDone = { email: email, schoolId: schoolId };
+  var msg = document.getElementById('parent-done-msg');
+  if(msg){
+    msg.textContent = addedToExisting
+      ? 'Student "'+studentName+'" has been added to '+email+'.'
+      : 'Your account '+email+' is ready and student "'+studentName+'" is linked to it.';
+  }
+  ['p-email-signup','p-pass-signup','p-code-signup'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+  switchParentTab('done');
+}
+function parentGoToSignIn(){
+  var d = window._parDone || {};
+  switchParentTab('login');
+  var e = document.getElementById('p-email-login');  if(e && d.email) e.value = d.email;
+  var sc = document.getElementById('p-school-login'); if(sc && d.schoolId) sc.value = d.schoolId;
+  var pw = document.getElementById('p-pass-login');  if(pw){ pw.value=''; try{ pw.focus(); }catch(_e){} }
+}
+
 // ── Parent Sign Up ──
 async function doParentSignup(){
   var email    = (document.getElementById('p-email-signup').value||'').trim().toLowerCase();
@@ -4870,54 +5416,78 @@ async function doParentSignup(){
   var errEl    = document.getElementById('parent-serr');
   var okEl     = document.getElementById('parent-sok');
   function pErr(msg){ errEl.textContent='❌ '+msg; errEl.style.display='flex'; okEl.style.display='none'; }
-  function pOk(msg){  okEl.textContent='✅ '+msg;  okEl.style.display='block'; errEl.style.display='none'; }
 
   if(!email || !pass || !code || !schoolId){ pErr('Please fill in all fields.'); return; }
   if(!email.includes('@') || !email.includes('.')){ pErr('Enter a valid email address.'); return; }
   if(pass.length < 6){ pErr('Password must be at least 6 characters.'); return; }
+  errEl.style.display='none'; okEl.style.display='none';
 
-  // Load the school DB to find the student by code
-  await supabaseLoad(schoolId);
-  var student = DB.students.find(function(s){ return s.sid.toUpperCase() === code; });
-  if(!student){ pErr('Student code "'+code+'" not found in the selected school. Check the code on the report card.'); return; }
+  var btn = document.querySelector('#parent-signup-tab .lbtn');
+  if(btn){ btn.disabled=true; btn.textContent='Checking…'; }
+  try{
+    // Always work with the newest school data
+    await _parentFreshLoad(schoolId);
+    var student = DB.students.find(function(s){ return String(s.sid||'').toUpperCase() === code; });
+    if(!student){ pErr('Student code "'+code+'" not found in the selected school. Check the code on the report card.'); return; }
+    var _shared={}; DB.students.forEach(function(x){ if(_normSid(x.sid)===code) _shared[_normName(x.name)]=1; });
+    if(Object.keys(_shared).length>1){ pErr('This academic code is used by more than one student. Please contact the school to correct it.'); return; }
 
-  // Confirm identity before completing registration
-  var confirmed = confirm('👪 Is "'+student.name+'" really your child?\n\nClick OK to confirm and complete registration.');
-  if(!confirmed){ pErr('Registration cancelled. Please double-check the student code with the school if this is not your child.'); return; }
+    var existing = DB.parents.find(function(p){ return p.email === email; });
+    if(existing && existing.studentCodes && existing.studentCodes.indexOf(code) >= 0){
+      pErr('Student "'+student.name+'" is already registered on this email. Use Sign In.'); return;
+    }
+    // ONE STUDENT = ONE EMAIL
+    var owner = _parentOwningCode(code, existing ? existing.id : null);
+    if(owner){ pErr(_parentTakenMsg(owner, student.name)); return; }
 
-  // Check if email already registered
-  if(!DB.parents) DB.parents = [];
-  var existing = DB.parents.find(function(p){ return p.email === email; });
-  if(existing){
-    // Email exists — add this student code if not already there
-    if(existing.studentCodes.indexOf(code) >= 0){
-      pErr('This email is already registered for student "'+student.name+'". Use Sign In.');
+    // Email already exists → only its owner (correct password) may add another student
+    if(existing){
+      var pwOk = await verifyPw(existing.password, pass);
+      if(!pwOk){
+        pErr('This email is already registered. To add another student, enter the SAME password you use for this email, or use "Forgot password" on the Sign In tab.');
+        return;
+      }
+    }
+
+    // Confirm identity before completing registration
+    var confirmed = confirm('👪 Is "'+student.name+'" really your child?\n\nClick OK to confirm and complete registration.');
+    if(!confirmed){ pErr('Registration cancelled. Please double-check the student code with the school if this is not your child.'); return; }
+
+    // Re-check right before saving (someone else may have registered this student meanwhile)
+    if(btn) btn.textContent='Saving…';
+    await _parentFreshLoad(schoolId);
+    existing = DB.parents.find(function(p){ return p.email === email; });
+    owner = _parentOwningCode(code, existing ? existing.id : null);
+    if(owner){ pErr(_parentTakenMsg(owner, student.name)); return; }
+    CURRENT_SCHOOL_ID = schoolId;
+
+    if(existing){
+      if(!Array.isArray(existing.studentCodes)) existing.studentCodes = [];
+      if(existing.studentCodes.indexOf(code) < 0) existing.studentCodes.push(code);
+      addLog('Parent '+email+' added student: '+student.name);
+      dbSave();
+      _parentRegDone(email, schoolId, student.name, true);
       return;
     }
-    existing.studentCodes.push(code);
-    addLog('Parent '+email+' added student: '+student.name);
-    CURRENT_SCHOOL_ID = schoolId;
-    dbSave();
-    pOk('Student "'+student.name+'" added to your account! You can now Sign In.');
-    return;
-  }
 
-  // New parent registration
-  var parentPwHash = await hashPw(pass);
-  var newParent = {
-    id: 'PAR'+Date.now(),
-    email: email,
-    password: parentPwHash,
-    studentCodes: [code],
-    schoolId: schoolId,
-    createdAt: new Date().toISOString()
-  };
-  DB.parents.push(newParent);
-  CURRENT_SCHOOL_ID = schoolId;
-  addLog('New parent registered: '+email+' for student: '+student.name);
-  dbSave();
-  pOk('Registered successfully! Student "'+student.name+'" linked. Click Sign In to continue.');
-  setTimeout(function(){ switchParentTab('login'); document.getElementById('p-email-login').value=email; }, 2000);
+    // New parent registration
+    var parentPwHash = await hashPw(pass);
+    DB.parents.push({
+      id: 'PAR'+Date.now(),
+      email: email,
+      password: parentPwHash,
+      studentCodes: [code],
+      schoolId: schoolId,
+      createdAt: new Date().toISOString()
+    });
+    addLog('New parent registered: '+email+' for student: '+student.name);
+    dbSave();
+    _parentRegDone(email, schoolId, student.name, false);
+  }catch(e){
+    pErr('Something went wrong. Please check your connection and try again.');
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent='Register →'; }
+  }
 }
 
 // ── Parent Login — School-isolated (no cross-school data access) ──
@@ -5133,13 +5703,126 @@ function _buildParentAttendance(student, cls){
     +'</div>';
 }
 
+// ── Terms inside a quiz year: every week belongs to a term (Term 1, 2 or 3) ──
+function _weekTerm(w){ return (w && w.term) ? w.term : 'Term 1'; }
+function _termNum(t){ var n=parseInt(String(t).replace(/\D/g,''),10); return isNaN(n)?1:n; }
+function _wkSorted(yr){
+  return (yr.weeks||[]).map(function(w,i){ return {w:w,i:i}; })
+    .sort(function(a,b){ return (_termNum(_weekTerm(a.w))-_termNum(_weekTerm(b.w))) || (a.i-b.i); })
+    .map(function(x){ return x.w; });
+}
+// Returns an array of HTML blocks (one per term) so it can replace  yr.weeks.map(...)  before .join('')
+function _wkGroup(yr, chipFn){
+  var out=[], order=[], by={};
+  _wkSorted(yr).forEach(function(w){ var t=_weekTerm(w); if(!by[t]){ by[t]=[]; order.push(t); } by[t].push(w); });
+  var canMove = false; try{ canMove = !yr.locked && isAdmin(); }catch(e){}
+  order.forEach(function(t){
+    out.push('<div style="flex:1 1 100%;margin-bottom:.35rem;">'
+      +'<div style="font-size:.64rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3);margin:.15rem 0 .3rem;">'+t+' · '+by[t].length+' week'+(by[t].length!==1?'s':'')+'</div>'
+      +'<div style="display:flex;flex-wrap:wrap;gap:5px;">'
+      + by[t].map(function(w){
+          return canMove
+            ? '<span style="display:inline-flex;align-items:center;gap:2px;">'+chipFn(w)
+              +'<button onclick="setWeekTerm(\''+yr.id+'\',\''+w.id+'\')" title="Change term" style="background:none;border:none;color:var(--ink3);cursor:pointer;font-size:.75rem;padding:0 2px;">⇄</button></span>'
+            : chipFn(w);
+        }).join('')
+      +'</div></div>');
+  });
+  return out;
+}
+function _promptNewWeek(yr){
+  var last = yr.weeks.length ? _weekTerm(yr.weeks[yr.weeks.length-1]) : 'Term 1';
+  var t = prompt('Which term is this week in? Enter 1, 2 or 3:', String(_termNum(last)));
+  if(t===null) return null;
+  var n = parseInt(t,10);
+  if(!(n>=1 && n<=3)){ alert('Please enter 1, 2 or 3.'); return null; }
+  var term = 'Term '+n;
+  var cnt = yr.weeks.filter(function(w){ return _weekTerm(w)===term; }).length;
+  var label = prompt('Week label for '+term+':', 'Week '+(cnt+1));
+  if(!label || !label.trim()) return null;
+  return { label: label.trim(), term: term };
+}
+function termWizard(yearId){
+  var yr = DB.quizYears.find(function(y){ return y.id===yearId; });
+  if(!yr || yr.locked){ alert('This year is locked.'); return; }
+  var cur = {1:0,2:0,3:0};
+  yr.weeks.forEach(function(w){ cur[_termNum(_weekTerm(w))]++; });
+  function ask(n, def){
+    var v = prompt('How many weeks in Term '+n+'?\n(Enter 0 if this term has no quiz weeks)', String(def));
+    if(v===null) return null;
+    var k = parseInt(v,10);
+    if(isNaN(k) || k<0 || k>60){ alert('Please enter a number from 0 to 60.'); return null; }
+    return k;
+  }
+  var n1 = ask(1, cur[1] || yr.weeks.length); if(n1===null) return;
+  var n2 = ask(2, cur[2]); if(n2===null) return;
+  var n3 = ask(3, Math.max(0, yr.weeks.length-n1-n2)); if(n3===null) return;
+  var total = n1+n2+n3;
+  if(total < yr.weeks.length){
+    alert('You have '+yr.weeks.length+' weeks but the terms add up to '+total+'.\nRemove the extra weeks with ✕ first, or increase a term.');
+    return;
+  }
+  var add = total - yr.weeks.length;
+  if(!confirm('Set the terms like this?\n\nTerm 1: '+n1+' weeks\nTerm 2: '+n2+' weeks\nTerm 3: '+n3+' weeks'
+      +(add?('\n\n'+add+' new week(s) will be created.'):'')+'\n\nExisting weeks are assigned in order. No marks are removed.')) return;
+  var sizes = {1:n1, 2:n2, 3:n3};
+  var stamp = Date.now();
+  for(var i=0; i<add; i++) yr.weeks.push({id:'W'+(stamp+i), label:'Week', term:'Term 1'});
+  var idx = 0;
+  [1,2,3].forEach(function(t){
+    for(var k=1; k<=sizes[t]; k++){
+      var w = yr.weeks[idx++];
+      w.term = 'Term '+t;
+      if(!w.label || /^week\s*\d*$/i.test(w.label.trim())) w.label = 'Week '+k;   // restart numbering in each term
+    }
+  });
+  try{ addLog('Set terms for '+yr.label+': T1='+n1+', T2='+n2+', T3='+n3); }catch(e){}
+  dbSave();
+  ['renderQuizYearsList','ovRenderQuizYearsList','renderDashQuizView','syncQuizWeekDropdowns'].forEach(function(fn){
+    try{ if(eval('typeof '+fn)==='function') eval(fn+'()'); }catch(e){}
+  });
+}
+
+function setWeekTerm(yearId, weekId){
+  var yr = DB.quizYears.find(function(y){ return y.id===yearId; });
+  if(!yr || yr.locked) return;
+  var idx = yr.weeks.findIndex(function(w){ return w.id===weekId; });
+  if(idx<0) return;
+  var w = yr.weeks[idx];
+  var t = prompt('Move "'+w.label+'" (now '+_weekTerm(w)+') to which term? Enter 1, 2 or 3:', String(_termNum(_weekTerm(w))));
+  if(t===null) return;
+  var n = parseInt(t,10);
+  if(!(n>=1 && n<=3)){ alert('Please enter 1, 2 or 3.'); return; }
+  var term = 'Term '+n;
+  w.term = term;
+  var later = yr.weeks.slice(idx+1).filter(function(x){ return _weekTerm(x)!==term; });
+  if(later.length && confirm('Also move the '+later.length+' week(s) listed after "'+w.label+'" to '+term+'?')){
+    later.forEach(function(x){ x.term = term; });
+  }
+  try{ addLog('Set term for week "'+w.label+'" to '+term); }catch(e){}
+  dbSave();
+  ['renderQuizYearsList','ovRenderQuizYearsList','renderDashQuizView','syncQuizWeekDropdowns'].forEach(function(fn){
+    try{ if(typeof window[fn]==='function') window[fn](); else if(typeof eval('typeof '+fn)==='string' && eval('typeof '+fn)==='function') eval(fn+'()'); }catch(e){}
+  });
+}
+
+function parSelChange(kind, val){
+  var s = window._parSel || (window._parSel = {});
+  if(kind==='child'){ s.code = val; s.yearId = null; s.term = null; s.weekId = null; }
+  else if(kind==='year'){ s.yearId = val; s.term = null; s.weekId = null; }
+  else if(kind==='term'){ s.term = val; s.weekId = (s.weekId==='all') ? 'all' : null; }
+  else { s.weekId = val; }
+  renderParentPortal();
+}
+
 function renderParentPortal(){
   var content = document.getElementById('parent-portal-content');
   if(!content) return;
 
   var codes = PARENT_USER.studentCodes || [];
   if(!codes.length){
-    content.innerHTML = '<div style="text-align:center;padding:3rem;"><div style="font-size:2.5rem;margin-bottom:1rem;">👪</div><div style="font-size:1rem;color:var(--ink2);">No students linked yet. Please register with your child&#39;s academic code.</div></div>';
+    content.innerHTML = '<div style="text-align:center;padding:3rem;"><div style="font-size:2.5rem;margin-bottom:1rem;">👪</div><div style="font-size:1rem;color:var(--ink2);">No students linked yet. Link your child with the academic code from the report card.</div>'
+      + '<button onclick="showAddChildModal()" style="margin-top:1rem;background:rgba(62,207,142,.1);border:1px solid rgba(62,207,142,.3);color:var(--green);border-radius:9px;padding:9px 20px;font-size:.85rem;font-weight:600;cursor:pointer;font-family:Outfit,sans-serif;">+ Link a Child</button></div>';
     return;
   }
 
@@ -5152,12 +5835,89 @@ function renderParentPortal(){
     + '<div style="font-size:.78rem;color:var(--ink3);">Position, marks per subject and average percentage — your child only.</div>'
     + '</div>';
 
+  // ── Selection state: child / term (year) / week ──
+  function _q(v){ return String(v==null?'':v).replace(/"/g,'&quot;'); }
+  var foundStudents = [];
+  var missingCodes = [];
+  codes.forEach(function(code){
+    var st = DB.students.find(function(s){ return s.sid.toUpperCase()===code.toUpperCase(); });
+    if(st) foundStudents.push(st); else missingCodes.push(code);
+  });
+  var sel = window._parSel || (window._parSel = {});
+  var selStudent = foundStudents.find(function(s){ return s.sid.toUpperCase()===String(sel.code||'').toUpperCase(); }) || foundStudents[0] || null;
+  sel.code = selStudent ? selStudent.sid : null;
+  var selCls = selStudent ? DB.classes.find(function(c){ return c.id===selStudent.classId; }) : null;
+  var yearsWithWeeks = (DB.quizYears||[]).filter(function(y){ return y.weeks && y.weeks.length; });
+  var selYear = yearsWithWeeks.find(function(y){ return y.id===sel.yearId; }) || yearsWithWeeks[yearsWithWeeks.length-1] || null;
+  sel.yearId = selYear ? selYear.id : null;
+  var selYearId = selYear ? selYear.id : null;
+  var selTerm = null, selWeekId = null, termsInYear = [], termWeeks = [];
+  if(selYear){
+    var sortedWeeks = _wkSorted(selYear);
+    sortedWeeks.forEach(function(w){ var t=_weekTerm(w); if(termsInYear.indexOf(t)<0) termsInYear.push(t); });
+    selTerm = termsInYear.indexOf(sel.term)>=0 ? sel.term : null;
+    var pool = sortedWeeks.filter(function(w){ return !selTerm || _weekTerm(w)===selTerm; });
+    selWeekId = sel.weekId;
+    var weekOk = selWeekId==='all' || pool.some(function(w){ return w.id===selWeekId; });
+    if(!weekOk){
+      // default: newest week that has marks for this child, else the newest week
+      var pick = pool[pool.length-1];
+      if(selStudent){
+        for(var wi=pool.length-1; wi>=0; wi--){
+          var w0 = pool[wi];
+          var has = quizSubs.some(function(sub){
+            var v = DB.marks['qz_'+selStudent.id+'_'+sub.id+'_'+selYear.id+'_'+w0.id];
+            return v!==undefined && v!=='' && !isNaN(parseFloat(v));
+          });
+          if(has){ pick = w0; break; }
+        }
+      }
+      selWeekId = pick.id;
+    }
+    if(!selTerm){
+      selTerm = (selWeekId==='all')
+        ? termsInYear[termsInYear.length-1]
+        : _weekTerm(selYear.weeks.find(function(w){ return w.id===selWeekId; }));
+    }
+    sel.term = selTerm; sel.weekId = selWeekId;
+    termWeeks = sortedWeeks.filter(function(w){ return _weekTerm(w)===selTerm; });
+  }
+
+  if(missingCodes.length){
+    html += '<div style="padding:.7rem 1rem;background:var(--s1);border:1px solid var(--bd);border-radius:10px;margin-bottom:1rem;color:var(--ink3);font-size:.8rem;">⚠️ Student with code <strong>'+missingCodes.join(', ')+'</strong> not found in current data.</div>';
+  }
+
+  var _selStyle = 'width:100%;padding:10px 12px;border-radius:9px;border:1px solid var(--bd);background:var(--s2);color:inherit;font:inherit;font-size:.88rem;';
+  var _lblStyle = 'display:block;font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3);margin-bottom:4px;';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:1.2rem;">';
+  if(foundStudents.length){
+    html += '<div style="flex:1 1 100%;"><label style="'+_lblStyle+'">Child</label>'
+      + '<select style="'+_selStyle+'" onchange="parSelChange(\'child\',this.value)">'
+      + foundStudents.map(function(st){ return '<option value="'+_q(st.sid)+'"'+(selStudent && st.id===selStudent.id?' selected':'')+'>'+st.name+'</option>'; }).join('')
+      + '</select></div>';
+  }
+  if(selYear){
+    {
+      html += '<div style="flex:1 1 100%;"><label style="'+_lblStyle+'">Academic year</label>'
+        + '<select style="'+_selStyle+'" onchange="parSelChange(\'year\',this.value)">'
+        + yearsWithWeeks.slice().reverse().map(function(y){ return '<option value="'+_q(y.id)+'"'+(y.id===selYearId?' selected':'')+'>'+y.label+'</option>'; }).join('')
+        + '</select></div>';
+    }
+    html += '<div style="flex:1 1 140px;"><label style="'+_lblStyle+'">Term</label>'
+      + '<select style="'+_selStyle+'" onchange="parSelChange(\'term\',this.value)">'
+      + termsInYear.map(function(t){ return '<option value="'+_q(t)+'"'+(t===selTerm?' selected':'')+'>'+t+'</option>'; }).join('')
+      + '</select></div>'
+      + '<div style="flex:1 1 140px;"><label style="'+_lblStyle+'">Week</label>'
+      + '<select style="'+_selStyle+'" onchange="parSelChange(\'week\',this.value)">'
+      + termWeeks.map(function(w){ return '<option value="'+_q(w.id)+'"'+(w.id===selWeekId?' selected':'')+'>'+quizWeekName(selCls,selYear,w)+'</option>'; }).join('')
+      + '<option value="all"'+(selWeekId==='all'?' selected':'')+'>All weeks in this term</option>'
+      + '</select></div>';
+  }
+  html += '</div>';
+
   codes.forEach(function(code){
     var student = DB.students.find(function(s){ return s.sid.toUpperCase()===code.toUpperCase(); });
-    if(!student){
-      html += '<div style="padding:1rem;background:var(--s1);border:1px solid var(--bd);border-radius:10px;margin-bottom:1rem;color:var(--ink3);font-size:.85rem;">⚠️ Student with code <strong>'+code+'</strong> not found in current data.</div>';
-      return;
-    }
+    if(!student || !selStudent || student.id!==selStudent.id) return;
     var cls = DB.classes.find(function(c){ return c.id===student.classId; });
 
     // Student card wrapper
@@ -5168,6 +5928,7 @@ function renderParentPortal(){
       + '<div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,var(--green),#1a7a4a);color:#fff;display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:700;flex-shrink:0;">'+student.name.slice(0,2).toUpperCase()+'</div>'
       + '<div><div style="font-weight:700;font-size:1rem;">'+student.name+'</div>'
       + '<div style="font-size:.72rem;color:var(--ink3);">Code: <strong style="color:var(--green);">'+student.sid+'</strong>'+(cls?' &nbsp;·&nbsp; Class: <strong>'+cls.name+'</strong>':'')+'</div></div>'
+      + '<button data-code="'+_q(student.sid)+'" onclick="parentRemoveStudent(this.getAttribute(\'data-code\'))" title="Remove this student from my email" style="margin-left:auto;background:none;border:1px solid rgba(224,82,82,.4);color:var(--red);border-radius:8px;padding:6px 11px;font-size:.74rem;font-weight:600;cursor:pointer;font-family:Outfit,sans-serif;white-space:nowrap;transition:all .15s;" onmouseover="this.style.background=\'rgba(224,82,82,.12)\'" onmouseout="this.style.background=\'none\'">🗑 Remove</button>'
       + '</div>';
 
     // Morning quiz data
@@ -5178,17 +5939,20 @@ function renderParentPortal(){
 
       DB.quizYears.slice().reverse().forEach(function(yr){
         if(!yr.weeks || !yr.weeks.length) return;
+        if(yr.id!==selYearId) return;
         var yearHtml = '';
 
         yr.weeks.forEach(function(wk){
+          var MX = quizMaxFor(cls, yr, wk.id), isMT = isMonthlyTest(cls, yr, wk.id), wkName = quizWeekName(cls, yr, wk);
+          if(selWeekId==='all'){ if(_weekTerm(wk)!==selTerm) return; } else if(wk.id!==selWeekId) return;
           // Gather this student's marks for this week
           var subResults = quizSubs.map(function(sub){
             var key = 'qz_'+student.id+'_'+sub.id+'_'+yr.id+'_'+wk.id;
             var v = DB.marks[key];
             var val = (v!==undefined && v!=='' && !isNaN(parseFloat(v))) ? parseFloat(v) : null;
-            var pct = val!==null ? (val/20)*100 : null;
+            var pct = val!==null ? (val/MX)*100 : null;
             var col = pct===null ? 'var(--ink3)' : pct>=80 ? 'var(--green)' : pct>=60 ? 'var(--blue)' : pct>=40 ? 'var(--gold)' : 'var(--red)';
-            return { name: sub.name, id: sub.id, val: val, col: col };
+            return { name: sub.name, id: sub.id, val: val, col: col, pct: pct };
           });
           var hasMarks = subResults.some(function(c){ return c.val!==null; });
           if(!hasMarks) return;
@@ -5197,7 +5961,7 @@ function renderParentPortal(){
           // ── Only show this week's marks if the class teacher has released them ──
           if(!cls || !quizWeekVisible(cls.id, wk.id)){
             yearHtml += '<div style="border:1px dashed var(--bd);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem;background:var(--s2);text-align:center;">'
-              + '<div style="font-size:.78rem;color:var(--ink3);">🔒 <strong>'+wk.label+'</strong> — results not yet released by the teacher.</div>'
+              + '<div style="font-size:.78rem;color:var(--ink3);">🔒 <strong>'+wkName+'</strong> — results not yet released by the teacher.</div>'
               + '</div>';
             return;
           }
@@ -5205,7 +5969,7 @@ function renderParentPortal(){
           // Compute this student's total and average
           var myTotal = 0; var myCnt = 0;
           subResults.forEach(function(c){ if(c.val!==null){myTotal+=c.val;myCnt++;} });
-          var myAvgPct = myCnt>0 ? (myTotal/(myCnt*20))*100 : null;
+          var myAvgPct = myCnt>0 ? (myTotal/(myCnt*MX))*100 : null;
 
           // Compute class rank: compare against all classmates in same year/week
           var classStudents = cls ? DB.students.filter(function(s){return s.classId===cls.id;}) : [];
@@ -5237,7 +6001,7 @@ function renderParentPortal(){
           yearHtml += '<div style="border:1px solid var(--bd);border-radius:10px;padding:.9rem 1rem;margin-bottom:.7rem;background:var(--s2);">'
             // Week label + rank row
             + '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem;">'
-            + '<div style="font-size:.82rem;font-weight:700;color:var(--ink2);">'+wk.label+'</div>'
+            + '<div style="font-size:.82rem;font-weight:700;color:var(--ink2);">'+(isMT?'📝 ':'')+wkName+(isMT?' <span style="font-size:.62rem;font-weight:700;color:var(--gold);background:rgba(246,201,14,.14);border:1px solid rgba(208,144,16,.4);border-radius:10px;padding:1px 8px;margin-left:4px;">out of 100</span>':'')+'</div>'
             + '<div style="display:flex;align-items:center;gap:8px;">'
             // Rank circle
             + (myRank!==null?'<div style="width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.95rem;flex-shrink:0;'+rankCircStyle+'">'+myRank+'</div>':'')
@@ -5258,7 +6022,8 @@ function renderParentPortal(){
                 return '<div style="text-align:center;min-width:56px;background:var(--s1);border:1px solid var(--bd);border-radius:8px;padding:6px 6px 4px;">'
                   + '<div style="font-size:.58rem;color:var(--ink3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em;">'+c.name+'</div>'
                   + '<div style="font-size:.95rem;font-weight:700;color:'+c.col+';">'+(c.val!==null ? c.val.toFixed(0) : '—')+'</div>'
-                  + '<div style="font-size:.55rem;color:var(--ink3);">/20</div>'
+                  + '<div style="font-size:.55rem;color:var(--ink3);">/'+MX+'</div>'
+                  + (isMT && c.pct!==null ? '<div style="font-size:.6rem;font-weight:700;color:'+c.col+';margin-top:1px;">'+c.pct.toFixed(0)+'%</div>' : '')
                   + '</div>';
               }).join('')
             + '</div>'
@@ -5274,9 +6039,12 @@ function renderParentPortal(){
       });
 
       if(!hasAnyQuizData){
-        html += '<div style="padding:1.2rem;font-size:.85rem;color:var(--ink3);">No quiz marks recorded yet.</div>';
+        html += '<div style="padding:1.2rem;font-size:.85rem;color:var(--ink3);">No marks recorded yet for the selected week.</div>';
       }
     }
+
+    // ── P6 ONLY: progress graph (weeks → current week) + Monthly Test % per subject ──
+    if(isP6Class(cls)) html += p6ParentProgress(student, cls, sel);
 
     // ── TEACHER-PARENT CHAT ──
     html += '<div style="padding:.8rem 1.2rem 1rem;" id="par-chat-section-'+student.id+'"><div style="font-size:.75rem;color:var(--ink3);text-align:center;padding:.5rem;">Loading chat…</div></div>';
@@ -5303,21 +6071,50 @@ function renderParentPortal(){
   });
 }
 
-function showAddChildModal(){
+async function showAddChildModal(){
   var code = prompt('Enter the student academic code from the report card:');
   if(!code||!code.trim()) return;
   code = code.trim().toUpperCase();
-  if(!DB.parents) DB.parents=[];
-  var student = DB.students.find(function(s){ return s.sid.toUpperCase()===code; });
-  if(!student){ alert('❌ Student code "'+code+'" not found. Check the code on the report card.'); return; }
-  if(PARENT_USER.studentCodes.indexOf(code)>=0){ alert('This student is already linked to your account.'); return; }
-  PARENT_USER.studentCodes.push(code);
-  // Update in DB
+  try{ await _parentFreshLoad(CURRENT_SCHOOL_ID); }catch(e){ alert('❌ Could not reach the server. Please check your connection and try again.'); return; }
   var dbPar = DB.parents.find(function(p){ return p.id===PARENT_USER.id; });
-  if(dbPar) dbPar.studentCodes = PARENT_USER.studentCodes;
+  if(!dbPar){ alert('❌ Your parent account could not be found. Please sign in again.'); return; }
+  PARENT_USER = dbPar;
+  if(!Array.isArray(dbPar.studentCodes)) dbPar.studentCodes = [];
+  var student = DB.students.find(function(s){ return String(s.sid||'').toUpperCase()===code; });
+  if(!student){ alert('❌ Student code "'+code+'" not found. Check the code on the report card.'); return; }
+  var _shared={}; DB.students.forEach(function(x){ if(_normSid(x.sid)===code) _shared[_normName(x.name)]=1; });
+  if(Object.keys(_shared).length>1){ alert('❌ This academic code is used by more than one student. Please contact the school to correct it.'); return; }
+  if(dbPar.studentCodes.indexOf(code)>=0){ alert('This student is already linked to your account.'); return; }
+  var owner = _parentOwningCode(code, dbPar.id);
+  if(owner){ alert('❌ '+_parentTakenMsg(owner, student.name)); return; }
+  if(!confirm('👪 Is "'+student.name+'" really your child?\n\nClick OK to link this student to '+dbPar.email+'.')) return;
+  dbPar.studentCodes.push(code);
   addLog('Parent '+PARENT_USER.email+' added student: '+student.name);
   dbSave();
+  window._parSel = { code: student.sid };
   renderParentPortal();
+}
+
+// ── Parent removes (unlinks) a student from their own email ──
+async function parentRemoveStudent(code){
+  if(!PARENT_USER) return;
+  code = String(code||'').toUpperCase();
+  var st = DB.students.find(function(s){ return String(s.sid||'').toUpperCase()===code; });
+  var nm = st ? st.name : code;
+  if(!confirm('🗑️ Remove "'+nm+'" from your account ('+PARENT_USER.email+')?\n\n'
+    +'• You will no longer see this child\'s marks, attendance or chat.\n'
+    +'• The student can then be registered again on any email with the academic code.\n\nContinue?')) return;
+  try{ await _parentFreshLoad(CURRENT_SCHOOL_ID); }catch(e){ alert('❌ Could not reach the server. Please check your connection and try again.'); return; }
+  var dbPar = DB.parents.find(function(p){ return p.id===PARENT_USER.id; });
+  if(!dbPar){ alert('❌ Your parent account could not be found. Please sign in again.'); return; }
+  dbPar.studentCodes = (dbPar.studentCodes||[]).filter(function(c){ return String(c).toUpperCase()!==code; });
+  PARENT_USER = dbPar;
+  addLog('Parent '+dbPar.email+' removed student: '+nm);
+  try{ auditLog('parent-unlink','parent '+dbPar.email+' removed '+nm); }catch(e){}
+  dbSave();
+  window._parSel = {};
+  renderParentPortal();
+  try{ _secToast('"'+nm+'" was removed from your account.'); }catch(e){}
 }
 
 
@@ -5630,6 +6427,8 @@ function enterApp(){
 }
 
 function doLogout(){
+  try{ _flushOnClose(); }catch(e){}   // upload anything still waiting before we clear the screen
+  _dbKeyLoaded = null;
   stopLiveSync();        // stops realtime subscription + poll
   stopParentLiveSync();  // stops parent realtime + poll
   // Clear all in-memory caches
@@ -6221,7 +7020,7 @@ function renderDashQuizView(){
         +'<button class="btn gold" onclick="dashSwitchMode(\'term\');showPage(\'marks\');setTimeout(function(){switchMarkMode(\'quiz\');},120);">✏️ Enter Quiz Marks</button>'
       +'</div>'
       +(wc?'<div style="display:flex;flex-wrap:wrap;gap:5px;">'
-        +activeYr.weeks.map(function(w){
+        +_wkGroup(activeYr, function(w){
           return '<span style="padding:3px 10px;border-radius:10px;font-size:.72rem;font-weight:600;background:rgba(74,143,255,.1);border:1px solid rgba(74,143,255,.2);color:var(--blue);">'+w.label+'</span>';
         }).join('')+'</div>'
       :'<div style="font-size:.74rem;color:var(--ink3);font-style:italic;">No weeks configured yet.</div>')
@@ -6255,6 +7054,7 @@ function renderDashQuizView(){
         +(!locked
           ?'<div style="display:flex;gap:5px;">'
             +'<button class="btn sm gold" onclick="ovAddWeek(\''+yr.id+'\')">+ Add Week</button>'
+            +'<button class="btn sm ghost" onclick="termWizard(\''+yr.id+'\')">🗂️ Terms</button>'
             +'<button class="btn sm ghost" onclick="ovEditYear(\''+yr.id+'\')">✏️</button>'
             +'<button class="btn sm ghost" onclick="ovLockYear(\''+yr.id+'\')">🔒 Close</button>'
           +'</div>'
@@ -6262,7 +7062,7 @@ function renderDashQuizView(){
       +'</div>'
       +(weeksCount
         ?'<div style="display:flex;flex-wrap:wrap;gap:5px;">'
-          +yr.weeks.map(function(w){
+          +_wkGroup(yr, function(w){
             return '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:10px;font-size:.72rem;font-weight:600;background:rgba(74,143,255,.1);border:1px solid rgba(74,143,255,.2);color:var(--blue);">'
               +w.label
               +(!locked?'<button onclick="ovRemoveWeek(\''+yr.id+'\',\''+w.id+'\')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.7rem;padding:0 0 0 3px;line-height:1;">✕</button>':'')
@@ -6295,11 +7095,10 @@ function ovAddQuizYear(){
 function ovAddWeek(yearId){
   var yr=DB.quizYears.find(function(y){return y.id===yearId;});
   if(!yr||yr.locked){alert('Year is locked.');return;}
-  var num=yr.weeks.length+1;
-  var label=prompt('Week label:','Week '+num);
-  if(!label||!label.trim()) return;
-  yr.weeks.push({id:'W'+Date.now(),label:label.trim()});
-  addLog('Added week to '+yr.label);
+  var nw=_promptNewWeek(yr);
+  if(!nw) return;
+  yr.weeks.push({id:'W'+Date.now(),label:nw.label,term:nw.term});
+  addLog('Added week to '+yr.label+' ('+nw.term+')');
   dbSave();
   renderQuizYearsList();
   ovRenderQuizYearsList();
@@ -6377,6 +7176,7 @@ function ovRenderQuizYearsList(){
         +'</div>'
         +'<div style="display:flex;gap:4px;flex-wrap:wrap;">'
           +(!locked?'<button class="btn sm gold" onclick="ovAddWeek(\''+yr.id+'\')">+ Week</button>':'')
+          +(!locked?'<button class="btn sm ghost" onclick="termWizard(\''+yr.id+'\')">🗂️ Terms</button>':'')
           +'<button class="btn sm ghost" onclick="ovEditYear(\''+yr.id+'\')">✏️</button>'
           +(!locked?'<button class="btn sm ghost" onclick="ovLockYear(\''+yr.id+'\')">🔒 Close</button>':'')
           +'<button class="btn sm red" onclick="ovDeleteYear(\''+yr.id+'\')">🗑️</button>'
@@ -6384,7 +7184,7 @@ function ovRenderQuizYearsList(){
       +'</div>'
       +(wc
         ?'<div style="display:flex;flex-wrap:wrap;gap:5px;">'
-          +yr.weeks.map(function(w){
+          +_wkGroup(yr, function(w){
             return '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:10px;font-size:.72rem;font-weight:600;background:rgba(74,143,255,.1);border:1px solid rgba(74,143,255,.2);color:var(--blue);">'
               +w.label
               +(!locked?'<button onclick="ovRemoveWeek(\''+yr.id+'\',\''+w.id+'\')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.7rem;padding:0 0 0 3px;line-height:1;">✕</button>':'')
@@ -8091,6 +8891,54 @@ function openEditStudent(id){
   var phEl=document.getElementById('mestpphone'); if(phEl) phEl.value=s.parentPhone||'';
   document.getElementById('mest').classList.add('open');
 }
+// ── Academic codes: every student has their own code ──
+function _normSid(x){ return String(x==null?'':x).trim().toUpperCase(); }
+function _normName(x){ return String(x==null?'':x).replace(/\s+/g,' ').trim().toLowerCase(); }
+// A code may be reused only by the SAME student in another academic year (promotion).
+function _sidConflict(sid, exceptId, termYearId, name){
+  var n=_normSid(sid); if(!n) return null;
+  var nm=_normName(name), ty=termYearId||null;
+  for(var i=0;i<DB.students.length;i++){
+    var s=DB.students[i];
+    if(!s || s.id===exceptId) continue;
+    if(_normSid(s.sid)!==n) continue;
+    if((s.termYearId||null)===ty) return s;      // same year: code already used
+    if(_normName(s.name)!==nm) return s;         // other year: code belongs to a different student
+  }
+  return null;
+}
+function _nextFreeSid(){
+  var used={}; DB.students.forEach(function(s){ used[_normSid(s.sid)]=1; });
+  var n=DB.students.length+1;
+  while(used[String(n)]) n++;
+  return String(n);
+}
+function _findDuplicateSids(){
+  var g={};
+  (DB.students||[]).forEach(function(s){ var k=_normSid(s.sid); if(!k) return; (g[k]=g[k]||[]).push(s); });
+  var out=[];
+  Object.keys(g).forEach(function(k){
+    var names={}, years={}, bad=false;
+    g[k].forEach(function(s){ names[_normName(s.name)]=1; var y=s.termYearId||''; if(years[y]) bad=true; years[y]=1; });
+    if(Object.keys(names).length>1 || bad) out.push({code:k, students:g[k]});
+  });
+  return out;
+}
+var _dupSigWarned = '';
+function _warnDuplicateSids(){
+  try{
+    if(typeof isAdmin!=='function' || !ME || !isAdmin()) return;
+    var d=_findDuplicateSids(); if(!d.length) return;
+    var sig=d.map(function(g){ return g.code+':'+g.students.map(function(s){return s.id;}).join(','); }).join('|');
+    if(sig===_dupSigWarned) return;
+    _dupSigWarned=sig;
+    var msg='⚠️ Duplicate academic codes found:\n\n'
+      +d.slice(0,8).map(function(g){ return '• '+g.code+' → '+g.students.map(function(s){ return s.name; }).join(' / '); }).join('\n')
+      +(d.length>8?'\n…and '+(d.length-8)+' more':'')
+      +'\n\nEvery student must have a different code. Go to Students → ✏️ and change the code of the wrong student.';
+    setTimeout(function(){ alert(msg); }, 400);
+  }catch(e){}
+}
 function saveEditStudent(){
   if(!isAdmin()){alert("Only the director can edit student details. You can only update parent phone numbers.");return;}
   var id=document.getElementById('mestid').value;
@@ -8099,7 +8947,18 @@ function saveEditStudent(){
   var sid=document.getElementById('mestnum').value.trim();
   var cid=document.getElementById('mestcls').value;
   if(!name||!cid){alert('Name and class are required.');return;}
-  s.name=name; s.sid=sid||s.sid; s.classId=cid;
+  var _newSid = sid||s.sid;
+  var _cf = _sidConflict(_newSid, s.id, s.termYearId, name);
+  if(_cf){ alert('❌ The academic code "'+_newSid+'" is already used by "'+_cf.name+'".\n\nEvery student must have a different code.'); return; }
+  var _oldSid = s.sid;
+  s.name=name; s.sid=_newSid; s.classId=cid;
+  if(_normSid(_oldSid)!==_normSid(_newSid)){
+    // keep registered parents linked when a code is changed
+    var _stillUsed = DB.students.some(function(x){ return x.id!==s.id && _normSid(x.sid)===_normSid(_oldSid); });
+    if(!_stillUsed) (DB.parents||[]).forEach(function(par){
+      par.studentCodes = (par.studentCodes||[]).map(function(c){ return _normSid(c)===_normSid(_oldSid) ? _normSid(_newSid) : c; });
+    });
+  }
   s.dob=(document.getElementById('mestdob')||{}).value||s.dob||'';
   s.gender=(document.getElementById('mestgender')||{}).value||s.gender||'';
   s.parentName=((document.getElementById('mestparent')||{}).value||'').trim()||s.parentName||'';
@@ -8121,8 +8980,16 @@ function addStudent(){
     alert('🔒 The current academic year "'+_aty.label+'" is closed.\n\nYou cannot add students to a locked year.\n\nPlease create a new academic year or ask the administrator to unlock it.');
     return;
   }
-  var sid=document.getElementById('mstnum').value.trim()||String(DB.students.length+1);
   name = name.replace(/\s+/g,' ').trim(); // normalize whitespace
+  var _sidIn=document.getElementById('mstnum').value.trim();
+  var sid;
+  if(_sidIn){
+    var _cf=_sidConflict(_sidIn, null, CURRENT_TERM_YEAR_ID, name);
+    if(_cf){ alert('❌ The academic code "'+_sidIn+'" is already used by "'+_cf.name+'".\n\nEvery student must have a different code. Choose another code, or leave it empty to get one automatically.'); return; }
+    sid=_sidIn;
+  } else {
+    sid=_nextFreeSid();
+  }
   DB.students.push({
     id:'ST'+Date.now(),
     name:name,
@@ -9386,11 +10253,11 @@ function _splitCsvLine(line, sep){
 
 // ── Core import logic — used by both old and new UI ──
 function _doImportRows(rows){
-  var added=0, skipped=0;
+  var added=0, skipped=0, conflicts=[];
   rows.forEach(function(p){
     var name = (p[0]||'').trim();
     if(!name){ skipped++; return; }
-    var sid   = (p[1]||'').trim() || String(DB.students.length+added+1);
+    var sid   = (p[1]||'').trim() || _nextFreeSid();
     var cname = (p[2]||'').trim();
     var gender= (p[3]||'').trim();
     var dob   = (p[4]||'').trim();
@@ -9400,7 +10267,8 @@ function _doImportRows(rows){
       if(!cls){cls={id:'C'+Date.now()+Math.random(),name:cname,level:cname};DB.classes.push(cls);}
       classId=cls.id;
     }
-    if(DB.students.find(function(s){return s.sid===sid&&(s.termYearId||null)===(CURRENT_TERM_YEAR_ID||null);})){skipped++;return;}
+    var _cf=_sidConflict(sid, null, CURRENT_TERM_YEAR_ID, name);
+    if(_cf){ skipped++; conflicts.push(name+' (code '+sid+' is used by '+_cf.name+')'); return; }
     var st={id:'ST'+Date.now()+Math.random(),name:name,sid:sid,classId:classId,termYearId:CURRENT_TERM_YEAR_ID||null};
     if(gender) st.gender=gender;
     if(dob)    st.dob=dob;
@@ -9408,7 +10276,7 @@ function _doImportRows(rows){
     added++;
   });
   if(added){ addLog('Imported '+added+' students'); dbSave(); renderStudents(); renderClasses(); syncAll(); }
-  return {added:added, skipped:skipped};
+  return {added:added, skipped:skipped, conflicts:conflicts};
 }
 
 // ══════════════════════════════════════════
@@ -9494,7 +10362,7 @@ function previewStudentImport(){
   var rows=_parseImportText(text);
   if(!rows.length){ msgEl.innerHTML='<div class="al err">⚠️ Could not parse any rows. Check your file format.</div>'; preEl.innerHTML=''; return; }
   // Build preview table
-  var willAdd=0,willSkip=0;
+  var willAdd=0,willSkip=0,_seen={};
   var tBody=rows.map(function(p,i){
     var name=(p[0]||'').trim();
     var sid=(p[1]||'').trim()||'—';
@@ -9502,7 +10370,12 @@ function previewStudentImport(){
     var gender=(p[3]||'').trim()||'—';
     var dob=(p[4]||'').trim()||'—';
     if(!name){willSkip++;return '';}
-    var exists=DB.students.find(function(s){return s.sid===sid&&sid!=='—'&&(s.termYearId||null)===(CURRENT_TERM_YEAR_ID||null);});
+    var _ns=_normSid(sid==='—'?'':sid);
+    var exists=null;
+    if(_ns){
+      exists=_sidConflict(sid,null,CURRENT_TERM_YEAR_ID,name);
+      if(!exists){ if(_seen[_ns]) exists={name:'a row above'}; else _seen[_ns]=1; }
+    }
     if(exists){willSkip++;
       return '<tr style="opacity:.45;">'
         +'<td style="color:var(--red);">⚠️ dup</td>'
@@ -9530,7 +10403,8 @@ function confirmStudentImport(){
   var rows=_parseImportText(text);
   var res=_doImportRows(rows);
   document.getElementById('stImportPreview').innerHTML='';
-  document.getElementById('stImportMsg').innerHTML='<div class="al ok">✅ Imported <strong>'+res.added+'</strong> student'+(res.added!==1?'s':'')+'. ('+res.skipped+' skipped)</div>';
+  document.getElementById('stImportMsg').innerHTML='<div class="al ok">✅ Imported <strong>'+res.added+'</strong> student'+(res.added!==1?'s':'')+'. ('+res.skipped+' skipped)'
+    +(res.conflicts&&res.conflicts.length?'<br><span style="font-size:.78rem;">Skipped because the academic code is already used:<br>'+res.conflicts.slice(0,6).map(esc).join('<br>')+(res.conflicts.length>6?'<br>…':'')+'</span>':'')+'</div>';
   document.getElementById('stImportPaste').value='';
 }
 
@@ -11777,13 +12651,13 @@ function genProcl(){
 
   out.innerHTML=
     // ── HEADER ──
-    '<div style="text-align:center;padding:1.4rem 1rem;background:var(--s1);border:1px solid var(--bd);border-radius:10px;margin-bottom:1rem;">'
-    +(schoolName?'<div style="font-size:.82rem;color:var(--ink3);font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:.4rem;">'+esc(schoolName)+'</div>':'')
-    +'<div style="font-family:\'Playfair Display\',serif;font-size:1.35rem;font-weight:700;">🏆 Proclamation List</div>'
-    +'<div style="margin-top:.5rem;display:inline-block;background:rgba(246,201,14,.12);border:1px solid rgba(246,201,14,.3);border-radius:20px;padding:3px 16px;">'
-    +'<span style="font-size:.9rem;font-weight:700;color:var(--gold);">'+esc(cn)+'</span>'
+    '<div class="qph-banner" style="text-align:center;padding:1.4rem 1rem;background:var(--s1);border:1px solid var(--bd);border-radius:10px;margin-bottom:1rem;">'
+    +(schoolName?'<div class="qph-school" style="font-size:.82rem;color:var(--ink3);font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:.4rem;">'+esc(schoolName)+'</div>':'')
+    +'<div class="qph-title" style="font-family:\'Playfair Display\',serif;font-size:1.35rem;font-weight:700;">🏆 Proclamation List</div>'
+    +'<div class="qph-pill" style="margin-top:.5rem;display:inline-block;background:rgba(246,201,14,.12);border:1px solid rgba(246,201,14,.3);border-radius:20px;padding:3px 16px;">'
+    +'<span class="qph-class" style="font-size:.9rem;font-weight:700;color:var(--gold);">'+esc(cn)+'</span>'
     +'</div>'
-    +'<div style="font-size:.78rem;color:var(--ink2);margin-top:.45rem;">'+esc(tl)+'</div>'
+    +'<div class="qph-date" style="font-size:.78rem;color:var(--ink2);margin-top:.45rem;">'+esc(tl)+'</div>'
     +'</div>'
 
     // ── FULL PROCLAMATION TABLE ──
@@ -12157,6 +13031,7 @@ var _liveSyncRunning = false;
 
 function startLiveSync(){
   stopLiveSync();
+  setTimeout(function(){ try{ _warnDuplicateSids(); }catch(e){} }, 3000);
   // 1. Subscribe to realtime push — instant multi-user updates
   _startRealtimeSubscription();
   // 2. Fallback poll every 8s (catches anything missed by realtime)
@@ -12171,6 +13046,7 @@ function stopLiveSync(){
 
 async function _liveSyncTick(){
   if(_liveSyncRunning || !CURRENT_SCHOOL_ID || !ME) return;
+  _pullRemoteIfNewer(false);   // cheap revision check every ~25s, even if realtime looks healthy
   // Skip poll if realtime channel is healthy (connected)
   if(_realtimeChannel && _realtimeChannel.state === 'joined') return;
   _liveSyncRunning = true;
@@ -12205,6 +13081,7 @@ function stopParentLiveSync(){
 
 async function _parentLiveSyncTick(){
   if(!CURRENT_SCHOOL_ID || !PARENT_USER) return;
+  _pullRemoteIfNewer(false);
   // Skip if realtime is healthy
   if(_parentRealtimeChannel && _parentRealtimeChannel.state === 'joined') return;
   try {
@@ -12484,9 +13361,153 @@ function exportData(){
   a.download='scorix_backup_'+new Date().toISOString().slice(0,10)+'.json';a.click();
 }
 function loadBackup(e){
-  var f=e.target.files[0];if(!f)return;
+  var inp=e.target, f=inp.files[0]; if(!f) return;
   var r=new FileReader();
-  r.onload=function(ev){try{DB=JSON.parse(ev.target.result);dbSave();location.reload();}catch(e){alert('Invalid backup file.');}};
+  r.onload=async function(ev){
+    try{
+      var obj=JSON.parse(ev.target.result);
+      // "Download Backup" files wrap the data as {_backup_info, data:{...}};
+      // "Export Backup" files are the raw database. Accept both.
+      var src=(obj && obj.data && typeof obj.data==='object' && !Array.isArray(obj.data)
+               && (obj._backup_info || obj.data.students || obj.data.classes)) ? obj.data : obj;
+      if(!src || !Array.isArray(src.students) || !Array.isArray(src.classes)){
+        alert('Invalid backup file: no students/classes found.'); inp.value=''; return;
+      }
+      var info=obj._backup_info||{};
+      var msg='Restore this backup?\n\n'
+        +(info.school?('School: '+info.school+'\n'):'')
+        +(info.generated?('Made on: '+new Date(info.generated).toLocaleString()+'\n'):'')
+        +'Students: '+src.students.length+'\nClasses: '+src.classes.length
+        +'\nTeachers: '+(src.teachers||[]).length
+        +'\nMarks entries: '+Object.keys(src.marks||{}).length
+        +'\n\nThis REPLACES all current data. Continue?';
+      if(!confirm(msg)){ inp.value=''; return; }
+
+      // Backups hide passwords as "[hidden]" -> keep the current passwords of the same accounts
+      var unmatched=0;
+      function restorePw(list, cur, keys){
+        (list||[]).forEach(function(x){
+          if(x && x.password==='[hidden]'){
+            var m=(cur||[]).find(function(c){
+              if(c.id && x.id && c.id===x.id) return true;
+              return keys.some(function(k){ return c[k] && x[k] && String(c[k]).toLowerCase()===String(x[k]).toLowerCase(); });
+            });
+            if(m && m.password && m.password!=='[hidden]') x.password=m.password; else unmatched++;
+          }
+        });
+      }
+      restorePw(src.users,    DB.users,    ['username','email']);
+      restorePw(src.teachers, DB.teachers, ['username','email']);
+      restorePw(src.parents,  DB.parents,  ['email','username']);
+
+      Object.keys(src).forEach(function(k){ DB[k]=src[k]; });
+      // A full restore must replace what is on the server (not be merged with it)
+      _forceOverwrite = true;
+
+      dbSave();
+      // Push to the cloud NOW (saving is normally delayed, and reloading would cancel it)
+      var keys=Object.keys(_pendingWrites);
+      for(var i=0;i<keys.length;i++){
+        var pw=_pendingWrites[keys[i]]; if(!pw) continue;
+        clearTimeout(pw.timer); delete _pendingWrites[keys[i]];
+        await _flushWrite(keys[i], pw.data);
+      }
+      alert('Backup restored: '+src.students.length+' students, '+src.classes.length+' classes.'
+        +(unmatched?('\n\nNote: '+unmatched+' account(s) had hidden passwords that could not be matched. Reset those passwords.'):'')
+        +(_isOnline?'':'\n\nYou are offline: saved on this device only, it will upload when the connection returns.'));
+      location.reload();
+    }catch(err){
+      console.error(err);
+      alert('Invalid backup file.');
+      inp.value='';
+    }
+  };
+  r.readAsText(f);
+}
+
+// ── Merge Backup: add back what is missing, never overwrite newer data ──
+function _bkIsObj(o){ return o && typeof o==='object' && !Array.isArray(o); }
+function _bkHasId(x){ return _bkIsObj(x) && x.id!==undefined; }
+function _bkMerge(cur, src, top, stats, depth){
+  Object.keys(src).forEach(function(k){
+    if(depth===0 && (k==='_rev'||k==='activity'||k==='audit'||k==='settings')) return;
+    var t = depth===0 ? k : top;
+    var sv=src[k], cv=cur[k];
+    if(cv===undefined || cv===null){
+      cur[k]=sv;
+      stats[t]=(stats[t]||0)+((depth===0 && Array.isArray(sv))?sv.length:(depth===0&&_bkIsObj(sv)?Object.keys(sv).length:1));
+      if(depth===0 && Array.isArray(sv) && (k==='users'||k==='teachers'||k==='parents')){
+        sv.forEach(function(x){ if(x && x.password==='[hidden]') stats._noPw=(stats._noPw||0)+1; });
+      }
+      return;
+    }
+    if(Array.isArray(cv) && Array.isArray(sv)){
+      if(sv.every(_bkHasId) && cv.every(_bkHasId)){
+        var have={}; cv.forEach(function(x){ have[x.id]=1; });
+        sv.forEach(function(x){
+          if(have[x.id]) return;
+          cv.push(x); stats[t]=(stats[t]||0)+1;
+          if(depth===0 && (k==='users'||k==='teachers'||k==='parents') && x.password==='[hidden]') stats._noPw=(stats._noPw||0)+1;
+        });
+      }
+    } else if(_bkIsObj(cv) && _bkIsObj(sv)){
+      _bkMerge(cv, sv, t, stats, depth+1);
+    } else if(t==='marks' && depth===1 && cv==='' && sv!=='' && sv!==undefined && sv!==null){
+      cur[k]=sv; stats.marks=(stats.marks||0)+1;   // blank now, had a mark in the backup
+    }
+  });
+}
+function mergeBackup(e){
+  var inp=e.target, f=inp.files[0]; if(!f) return;
+  var r=new FileReader();
+  r.onload=async function(ev){
+    try{
+      var obj=JSON.parse(ev.target.result);
+      var src=(obj && obj.data && typeof obj.data==='object' && !Array.isArray(obj.data)
+               && (obj._backup_info || obj.data.students || obj.data.classes)) ? obj.data : obj;
+      if(!src || !Array.isArray(src.students) || !Array.isArray(src.classes)){
+        alert('Invalid backup file: no students/classes found.'); inp.value=''; return;
+      }
+      // Dry run on a copy first
+      var copy=JSON.parse(JSON.stringify(DB));
+      var stats={};
+      _bkMerge(copy, JSON.parse(JSON.stringify(src)), '', stats, 0);
+      var noPw=stats._noPw||0; delete stats._noPw;
+      var labels={marks:'Marks',students:'Students',classes:'Classes',subjects:'Subjects',teachers:'Teachers',users:'User accounts',parents:'Parents',attendance:'Attendance entries',remarks:'Remarks',messages:'Messages'};
+      var keys=Object.keys(stats).filter(function(k){ return stats[k]>0; });
+      if(!keys.length){
+        alert('Nothing to restore. Your current data already contains everything in this backup.');
+        inp.value=''; return;
+      }
+      var info=obj._backup_info||{};
+      var msg='Merge this backup into your current data?\n\n'
+        +(info.school?('School: '+info.school+'\n'):'')
+        +(info.generated?('Backup made on: '+new Date(info.generated).toLocaleString()+'\n'):'')
+        +'\nWill be ADDED back (missing from current data):\n'
+        +keys.map(function(k){ return ' • '+(labels[k]||k)+': '+stats[k]; }).join('\n')
+        +'\n\nEverything you entered or changed after this backup is KEPT. Nothing is overwritten.'
+        +'\n\nContinue?';
+      if(!confirm(msg)){ inp.value=''; return; }
+
+      Object.keys(copy).forEach(function(k){ DB[k]=copy[k]; });
+      try{ auditLog('backup-merge', keys.map(function(k){ return k+':'+stats[k]; }).join(', ')); }catch(_){}
+      dbSave();
+      var pk=Object.keys(_pendingWrites);
+      for(var i=0;i<pk.length;i++){
+        var pw=_pendingWrites[pk[i]]; if(!pw) continue;
+        clearTimeout(pw.timer); delete _pendingWrites[pk[i]];
+        await _flushWrite(pk[i], pw.data);
+      }
+      alert('Backup merged.\n\n'+keys.map(function(k){ return (labels[k]||k)+': +'+stats[k]; }).join('\n')
+        +(noPw?('\n\nNote: '+noPw+' restored account(s) have no usable password (backups hide passwords). Reset those passwords.'):'')
+        +(_isOnline?'':'\n\nYou are offline: saved on this device only, it will upload when the connection returns.'));
+      location.reload();
+    }catch(err){
+      console.error(err);
+      alert('Invalid backup file.');
+      inp.value='';
+    }
+  };
   r.readAsText(f);
 }
 function clearAll(){
@@ -12964,19 +13985,56 @@ function quizMarkKey(stId, subId, weekId){
   return 'qz_'+stId+'_'+subId+'_'+(CURRENT_QUIZ_YEAR_ID||'noyr')+'_'+weekId;
 }
 
+// ── Academic year / Term / Week selects for quiz entry and quiz rankings ──
+var _qTermSel = {qz:null, qp:null};
+function _fillQuizSelects(prefix, yr){
+  var yEl=document.getElementById(prefix+'Year'), tEl=document.getElementById(prefix+'Term'), wEl=document.getElementById(prefix+'Week');
+  if(yEl){
+    yEl.innerHTML = (DB.quizYears||[]).slice().reverse().map(function(y){
+      return '<option value="'+y.id+'"'+(yr && y.id===yr.id?' selected':'')+'>'+y.label+(y.locked?' 🔒':'')+'</option>';
+    }).join('') || '<option value="">— No academic year —</option>';
+  }
+  var weeks = (yr && yr.weeks) ? _wkSorted(yr) : [];
+  var terms = [];
+  weeks.forEach(function(w){ var t=_weekTerm(w); if(terms.indexOf(t)<0) terms.push(t); });
+  var curWeek = wEl ? wEl.value : '';
+  var term = _qTermSel[prefix];
+  if(curWeek){ var cw = weeks.find(function(w){ return w.id===curWeek; }); if(cw) term = _weekTerm(cw); }
+  if(terms.indexOf(term)<0) term = terms.length ? terms[terms.length-1] : null;
+  _qTermSel[prefix] = term;
+  if(tEl){
+    tEl.innerHTML = terms.length
+      ? terms.map(function(t){ return '<option value="'+t+'"'+(t===term?' selected':'')+'>'+t+'</option>'; }).join('')
+      : '<option value="">— No terms —</option>';
+  }
+  if(wEl){
+    var list = weeks.filter(function(w){ return _weekTerm(w)===term; });
+    wEl.innerHTML = '<option value="">— Select Week —</option>'
+      + (list.length
+          ? list.map(function(w){ return '<option value="'+w.id+'">'+w.label+'</option>'; }).join('')
+          : '<option value="" disabled>— No weeks — ask director —</option>');
+    if(curWeek && list.some(function(w){ return w.id===curWeek; })) wEl.value = curWeek;
+  }
+  _p6DecorateWeekOptions(prefix);
+}
+function quizTermPick(prefix){
+  var tEl=document.getElementById(prefix+'Term'), wEl=document.getElementById(prefix+'Week');
+  _qTermSel[prefix] = tEl ? tEl.value : null;
+  if(wEl) wEl.value = '';
+  _fillQuizSelects(prefix, getActiveQuizYear());
+  if(prefix==='qz'){ try{ loadQuizTable(); }catch(e){} } else { try{ genQuizProcl(); }catch(e){} }
+}
+function quizYearPick(yearId){
+  if(!yearId) return;
+  _qTermSel.qz = null; _qTermSel.qp = null;
+  ['qzWeek','qpWeek'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+  selectQuizYear(yearId);
+}
+
 function syncQuizWeekDropdowns(){
   var yr = getActiveQuizYear(); // auto-selects if CURRENT_QUIZ_YEAR_ID is null
-  var opts = yr && yr.weeks && yr.weeks.length
-    ? yr.weeks.map(function(w){return'<option value="'+w.id+'">'+w.label+'</option>';}).join('')
-    : '<option value="">— No weeks — ask director —</option>';
-  ['qzWeek','qpWeek'].forEach(function(id){
-    var el=document.getElementById(id);
-    if(el){
-      var cur=el.value;
-      el.innerHTML='<option value="">— Select Week —</option>'+opts;
-      if(cur) el.value=cur;
-    }
-  });
+  _fillQuizSelects('qz', yr);
+  _fillQuizSelects('qp', yr);
   // Update year labels
   var lbl = yr ? yr.label : '—';
   var locked = yr && yr.locked;
@@ -13130,12 +14188,11 @@ function addQuizWeek(yearId){
   var yr = DB.quizYears.find(function(y){return y.id===yearId;});
   if(!yr){return;}
   if(yr.locked){alert('This year is locked.');return;}
-  var num = (yr.weeks.length+1);
-  var label = prompt('Week label (e.g. Week '+num+'):','Week '+num);
-  if(!label||!label.trim()) return;
+  var nw = _promptNewWeek(yr);
+  if(!nw) return;
   var wid = 'W'+Date.now();
-  yr.weeks.push({id:wid, label:label.trim()});
-  addLog('Added week "'+label.trim()+'" to '+yr.label);
+  yr.weeks.push({id:wid, label:nw.label, term:nw.term});
+  addLog('Added week "'+nw.label+'" ('+nw.term+') to '+yr.label);
   dbSave();
   renderQuizYearsList();
   syncQuizWeekDropdowns();
@@ -13216,6 +14273,7 @@ function renderQuizYearsList(){
         +'</div>'
         +'<div style="display:flex;gap:5px;flex-wrap:wrap;">'
           +(!locked?'<button class="btn sm ghost" onclick="addQuizWeek(\''+yr.id+'\')">+ Week</button>':'')
+          +(!locked?'<button class="btn sm ghost" onclick="termWizard(\''+yr.id+'\')">🗂️ Terms</button>':'')
           +'<button class="btn sm ghost" onclick="editQuizYear(\''+yr.id+'\')" title="Rename year">✏️</button>'
           +(!locked?'<button class="btn sm gold" onclick="lockQuizYear(\''+yr.id+'\')">🔒 Close Year</button>':'<span style="font-size:.7rem;font-weight:700;color:var(--red);padding:3px 10px;background:rgba(224,82,82,.1);border-radius:10px;">🔒 CLOSED</span>')
           +'<button class="btn sm red" onclick="deleteQuizYear(\''+yr.id+'\')">🗑️</button>'
@@ -13224,7 +14282,7 @@ function renderQuizYearsList(){
       // Weeks
       +(yr.weeks&&yr.weeks.length
         ? '<div style="display:flex;flex-wrap:wrap;gap:5px;">'
-          +yr.weeks.map(function(w){
+          +_wkGroup(yr, function(w){
             return '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:10px;font-size:.72rem;font-weight:600;background:var(--s3);border:1px solid var(--bd);color:var(--ink2);">'
               +w.label
               +(!locked?'<button onclick="removeQuizWeek(\''+yr.id+'\',\''+w.id+'\')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.7rem;padding:0 0 0 3px;line-height:1;">✕</button>':'')
@@ -13768,6 +14826,240 @@ function renderTermYearsList(){
 // ██████████████████████████████████████████████████████████████████
 // ═══════════════════════════════════════
 
+
+// ══════════════════════════════════════════════════════════════════
+// ██  P6 MONTHLY TEST
+// ██  In class P6, every 4th week of a term (4, 8, 12 …) is a "Monthly
+// ██  Test": all subjects are marked out of 100 (other weeks stay /20).
+// ██  Analysis + the parent progress graph use Monthly Tests only/normalised %.
+// ══════════════════════════════════════════════════════════════════
+function isP6Class(cls){
+  if(!cls) return false;
+  return /^\s*(p|primary)\.?\s*-?\s*6(?!\d)/i.test(String(cls.name||''));
+}
+function p6WeekInfo(yr, weekId){
+  var none={monthly:false,pos:0,n:0,term:'Term 1',termNum:1};
+  if(!yr||!yr.weeks) return none;
+  var w=yr.weeks.find(function(x){return x.id===weekId;});
+  if(!w) return none;
+  var t=_weekTerm(w);
+  var list=_wkSorted(yr).filter(function(x){return _weekTerm(x)===t;});
+  var pos=list.findIndex(function(x){return x.id===weekId;})+1;
+  return {monthly:pos>0&&pos%4===0, pos:pos, n:Math.floor(pos/4), term:t, termNum:_termNum(t)};
+}
+function isMonthlyTest(cls, yr, weekId){ return isP6Class(cls) && p6WeekInfo(yr,weekId).monthly; }
+function quizMaxFor(cls, yr, weekId){ return isMonthlyTest(cls,yr,weekId) ? 100 : 20; }
+// Name shown to teachers/parents: "Monthly Test 1" instead of "Week 4" for P6
+function quizWeekName(cls, yr, w){
+  if(!w) return '';
+  if(isMonthlyTest(cls,yr,w.id)) return 'Monthly Test '+p6WeekInfo(yr,w.id).n;
+  return w.label;
+}
+function _subPassPct(sub){
+  var sc=parseFloat(sub&&sub.scale), pp=parseFloat(sub&&sub.pass);
+  return (sc>0 && pp>0 && pp<=sc) ? (pp/sc)*100 : 50;
+}
+function _pctCol(p){ return p===null||p===undefined ? 'var(--ink3)' : p>=80?'var(--green)':p>=60?'var(--blue)':p>=40?'var(--gold)':'var(--red)'; }
+// Teacher week drop-downs: tag the monthly-test weeks when a P6 class is selected
+function _p6DecorateWeekOptions(prefix){
+  try{
+    var cEl=document.getElementById(prefix==='qz'?'qzCls':'qpCls'), wEl=document.getElementById(prefix+'Week');
+    var yr=getActiveQuizYear(); if(!cEl||!wEl||!yr) return;
+    var cls=DB.classes.find(function(c){return c.id===cEl.value;});
+    Array.prototype.forEach.call(wEl.options,function(o){
+      if(!o.value) return;
+      var w=(yr.weeks||[]).find(function(x){return x.id===o.value;}); if(!w) return;
+      o.textContent = isMonthlyTest(cls,yr,w.id) ? (w.label+' — 📝 Monthly Test (/100)') : w.label;
+    });
+  }catch(e){}
+}
+
+
+// ── Proclamation block: how many students fall in each score range, per subject (Monthly Test only) ──
+var P6_BANDS=[{lbl:'90-100',min:90},{lbl:'80-89',min:80},{lbl:'70-79',min:70},{lbl:'60-69',min:60},{lbl:'50-59',min:50},{lbl:'40-49',min:40},{lbl:'0-39',min:0}];
+function p6BandsHtml(cid, weekId){
+  var cls=DB.classes.find(function(c){return c.id===cid;});
+  var yr=getActiveQuizYear();
+  if(!isMonthlyTest(cls,yr,weekId)) return '';
+  var students=yearStudents().filter(function(s){return s.classId===cid;});
+  var subjects=levelSubjects().filter(function(s){return s.scale!=='letter' && !s.universal;});
+  var wk=(yr.weeks||[]).find(function(w){return w.id===weekId;});
+  var bandCol=['var(--green)','var(--green)','var(--blue)','var(--blue)','var(--gold)','var(--gold)','var(--red)'];
+  function bandIdx(p){ for(var i=0;i<P6_BANDS.length;i++){ if(p>=P6_BANDS[i].min) return i; } return P6_BANDS.length-1; }
+  function rowFor(label, pcts, passPct, bold){
+    var counts=P6_BANDS.map(function(){return 0;});
+    pcts.forEach(function(p){ counts[bandIdx(p)]++; });
+    var n=pcts.length;
+    var avg=n?pcts.reduce(function(a,b){return a+b;},0)/n:null;
+    var passed=pcts.filter(function(p){return p>=passPct;}).length;
+    var td='padding:5px 6px;text-align:center;border-bottom:1px solid var(--bd);';
+    return '<tr'+(bold?' style="background:var(--s3);font-weight:800;"':'')+'><td style="'+td+'text-align:left;font-weight:700;">'+esc(label)+'</td>'
+      +counts.map(function(c,i){return '<td style="'+td+'font-weight:'+(c?'800':'400')+';color:'+(c?bandCol[i]:'var(--ink3)')+';">'+c+'</td>';}).join('')
+      +'<td style="'+td+'">'+n+'</td>'
+      +'<td style="'+td+'font-weight:700;color:'+_pctCol(avg)+';">'+(avg!==null?avg.toFixed(1)+'%':'—')+'</td>'
+      +'<td style="'+td+'font-weight:700;color:'+_pctCol(n?(passed/n)*100:null)+';">'+(n?((passed/n)*100).toFixed(0)+'%':'—')+'</td></tr>';
+  }
+  var rows='', stuAvg={};
+  subjects.forEach(function(sub){
+    var pcts=[], pp=_subPassPct(sub);
+    students.forEach(function(st){
+      var v=DB.marks[quizMarkKey(st.id,sub.id,weekId)];
+      if(v!==undefined&&v!==''&&!isNaN(parseFloat(v))){
+        var p=parseFloat(v); pcts.push(p);
+        (stuAvg[st.id]=stuAvg[st.id]||[]).push(p);
+      }
+    });
+    rows+=rowFor(sub.name,pcts,pp,false);
+  });
+  var overall=Object.keys(stuAvg).map(function(k){var a=stuAvg[k];return a.reduce(function(x,y){return x+y;},0)/a.length;});
+  rows+=rowFor('ALL SUBJECTS (student average)',overall,50,true);
+  var th='padding:6px 6px;text-align:center;font-size:.72rem;font-weight:800;border-bottom:2px solid var(--bd);white-space:nowrap;';
+  return '<div class="card p6mt" style="margin-top:.8rem;overflow-x:auto;border:2px solid rgba(208,144,16,.55);">'
+    +'<div class="p6mt-title" style="font-weight:800;font-size:1rem;margin-bottom:.15rem;">📝 '+esc(quizWeekName(cls,yr,wk))+' Analysis — number of students per score range</div>'
+    +'<div style="font-size:.68rem;color:var(--ink3);margin-bottom:.6rem;">Marks out of 100 · % Succeeded = students who reached the subject pass mark (50% if none set)</div>'
+    +'<table style="width:100%;border-collapse:collapse;font-size:.85rem;"><thead><tr style="background:var(--s3);">'
+    +'<th style="'+th+'text-align:left;">Subject</th>'
+    +P6_BANDS.map(function(b){return '<th style="'+th+'">'+b.lbl+'</th>';}).join('')
+    +'<th style="'+th+'">Students</th><th style="'+th+'">Avg %</th><th style="'+th+'">% Succeeded</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+
+// ── Teacher analysis: per-subject success on MONTHLY TESTS only (weekly /20 quizzes are excluded) ──
+function p6MonthlyAnalysisHtml(cid, selWeek){
+  var cls=DB.classes.find(function(c){return c.id===cid;});
+  var yr=getActiveQuizYear();
+  if(!isP6Class(cls)||!yr) return '';
+  var students=yearStudents().filter(function(s){return s.classId===cid;});
+  var subjects=levelSubjects().filter(function(s){return s.scale!=='letter' && !s.universal;});
+  var tests=_wkSorted(yr).filter(function(w){return p6WeekInfo(yr,w.id).monthly;});
+  var head='<div class="card" style="margin-top:1rem;"><div class="ctitle">📈 Monthly Tests — progress across the year</div>'
+    +'<div style="font-size:.74rem;color:var(--ink3);margin-bottom:.8rem;">Only Monthly Tests (out of 100) are analysed here — weekly /20 quizzes are not included. '
+    +'“Succeeded” = students who reached the subject pass mark (50% when none is set).</div>';
+  function stats(weekId, sub){
+    var arr=[];
+    students.forEach(function(st){
+      var v=DB.marks[quizMarkKey(st.id,sub.id,weekId)];
+      if(v!==undefined&&v!==''&&!isNaN(parseFloat(v))) arr.push(parseFloat(v));
+    });
+    if(!arr.length) return null;
+    var pp=_subPassPct(sub), passed=arr.filter(function(v){return v>=pp;}).length;
+    return {n:arr.length, avg:arr.reduce(function(a,b){return a+b;},0)/arr.length, passed:passed,
+            pass:(passed/arr.length)*100, hi:Math.max.apply(null,arr), lo:Math.min.apply(null,arr)};
+  }
+  if(!tests.length) return head+'<div class="empty"><p>No Monthly Test weeks yet — they appear automatically as week 4, 8, 12… of each term.</p></div></div>';
+  var html=head;
+  // (b) all monthly tests – class average % / % succeeded per subject
+  var th=tests.map(function(w){var i=p6WeekInfo(yr,w.id);return '<th style="text-align:center;font-size:.68rem;">T'+i.termNum+' · MT'+i.n+'</th>';}).join('');
+  var rows2=subjects.map(function(sub){
+    var cells=tests.map(function(w){
+      var st=stats(w.id,sub);
+      return st ? '<td style="text-align:center;"><div style="font-weight:700;color:'+_pctCol(st.avg)+';">'+st.avg.toFixed(0)+'%</div><div style="font-size:.62rem;color:var(--ink3);">'+st.pass.toFixed(0)+'% passed</div></td>'
+                : '<td style="text-align:center;color:var(--ink3);">—</td>';
+    }).join('');
+    return '<tr><td><strong>'+esc(sub.name)+'</strong></td>'+cells+'</tr>';
+  }).join('');
+  html+='<div style="font-size:.8rem;font-weight:700;margin:1rem 0 .4rem;">All Monthly Tests this year — class average % (and % of students who succeeded)</div>'
+    +'<div class="tw"><table><thead><tr><th>Subject</th>'+th+'</tr></thead><tbody>'+rows2+'</tbody></table></div></div>';
+  return html;
+}
+
+// ── Parent portal (P6 only): progress graph from the chosen week up to the latest released week ──
+function p6ChartChange(kind,val){
+  var s=window._parSel||(window._parSel={});
+  if(kind==='from') s.p6From=val; else if(kind==='subj') s.p6Subj=val; else s.p6Mode=val;
+  renderParentPortal();
+}
+function p6ParentProgress(student, cls, sel){
+  var yr=(DB.quizYears||[]).find(function(y){return y.id===sel.yearId;});
+  if(!yr||!cls) return '';
+  var subs=levelSubjects().filter(function(s){return s.scale!=='letter' && !s.universal;});
+  var all=[];
+  _wkSorted(yr).forEach(function(w){
+    if(!quizWeekVisible(cls.id,w.id)) return;                    // only weeks released by the teacher
+    var info=p6WeekInfo(yr,w.id), MX=info.monthly?100:20, per={}, tot=0, cnt=0;
+    subs.forEach(function(sub){
+      var v=DB.marks['qz_'+student.id+'_'+sub.id+'_'+yr.id+'_'+w.id];
+      if(v!==undefined&&v!==''&&!isNaN(parseFloat(v))){ per[sub.id]=(parseFloat(v)/MX)*100; tot+=parseFloat(v); cnt++; }
+    });
+    if(!cnt) return;
+    all.push({id:w.id, label:w.label, monthly:info.monthly, n:info.n, pos:info.pos, termNum:info.termNum, per:per, avg:(tot/(cnt*MX))*100});
+  });
+  var box='<div style="margin:.2rem 1.2rem 1.2rem;border:1px solid var(--bd);border-radius:12px;background:var(--s2);padding:1rem;">'
+    +'<div style="font-size:.95rem;font-weight:700;margin-bottom:.15rem;">📈 My Child\'s Progress</div>';
+  if(!all.length) return box+'<div style="font-size:.8rem;color:var(--ink3);">The graph will appear once the teacher releases quiz results.</div></div>';
+
+  var fromId=all.some(function(p){return p.id===sel.p6From;}) ? sel.p6From : all[0].id;
+  var subj=(sel.p6Subj==='all'||subs.some(function(x){return x.id===sel.p6Subj;})) ? (sel.p6Subj||'all') : 'all';
+  var mode=sel.p6Mode==='monthly' ? 'monthly' : 'all';
+  var startIdx=all.findIndex(function(p){return p.id===fromId;});
+  var pts=all.slice(startIdx).filter(function(p){ return (mode==='all'||p.monthly) && (subj==='all' || p.per[subj]!==undefined); })
+    .map(function(p){ return Object.assign({},p,{y: subj==='all'?p.avg:p.per[subj]}); });
+
+  var sS='padding:7px 9px;border-radius:8px;border:1px solid var(--bd);background:var(--s1);color:inherit;font:inherit;font-size:.78rem;max-width:100%;';
+  var lS='display:block;font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3);margin-bottom:3px;';
+  box+='<div style="font-size:.72rem;color:var(--ink3);margin-bottom:.7rem;">Percentage per week, from the week you choose up to the latest week. Weekly quizzes (/20) and Monthly Tests (/100) are both shown as %.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:.8rem;">'
+    +'<div style="flex:1 1 130px;"><label style="'+lS+'">From</label><select style="'+sS+'width:100%;" onchange="p6ChartChange(\'from\',this.value)">'
+      +all.map(function(p){return '<option value="'+p.id+'"'+(p.id===fromId?' selected':'')+'>T'+p.termNum+' · '+esc(p.monthly?'Monthly Test '+p.n:p.label)+'</option>';}).join('')+'</select></div>'
+    +'<div style="flex:1 1 130px;"><label style="'+lS+'">Subject</label><select style="'+sS+'width:100%;" onchange="p6ChartChange(\'subj\',this.value)">'
+      +'<option value="all"'+(subj==='all'?' selected':'')+'>All subjects (average)</option>'
+      +subs.map(function(x){return '<option value="'+x.id+'"'+(x.id===subj?' selected':'')+'>'+esc(x.name)+'</option>';}).join('')+'</select></div>'
+    +'<div style="flex:1 1 130px;"><label style="'+lS+'">Show</label><select style="'+sS+'width:100%;" onchange="p6ChartChange(\'mode\',this.value)">'
+      +'<option value="all"'+(mode==='all'?' selected':'')+'>Every week</option>'
+      +'<option value="monthly"'+(mode==='monthly'?' selected':'')+'>Monthly Tests only</option></select></div></div>';
+
+  if(!pts.length){
+    box+='<div style="font-size:.8rem;color:var(--ink3);padding:.6rem 0;">No results to plot for this selection.</div>';
+  } else {
+    var W=640,H=280,L=40,R=16,T=22,B=52, iw=W-L-R, ih=H-T-B;
+    function X(i){ return pts.length===1 ? L+iw/2 : L+(iw*i)/(pts.length-1); }
+    function Y(v){ return T+ih-(Math.max(0,Math.min(100,v))/100)*ih; }
+    var svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;" role="img" aria-label="Progress graph">';
+    [0,25,50,75,100].forEach(function(g){
+      svg+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+Y(g)+'" y2="'+Y(g)+'" style="stroke:var(--bd);stroke-width:1;'+(g===50?'stroke-dasharray:5 4;stroke-width:1.4;':'')+'"/>'
+        +'<text x="'+(L-6)+'" y="'+(Y(g)+3)+'" text-anchor="end" style="fill:var(--ink3);font-size:10px;">'+g+'%</text>';
+    });
+    if(pts.length>1){
+      svg+='<polyline fill="none" style="stroke:var(--blue);stroke-width:2.2;stroke-linejoin:round;" points="'+pts.map(function(p,i){return X(i).toFixed(1)+','+Y(p.y).toFixed(1);}).join(' ')+'"/>';
+    }
+    var step=pts.length>14?2:1;
+    pts.forEach(function(p,i){
+      var cx=X(i), cy=Y(p.y);
+      svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+(p.monthly?6.5:4)+'" style="fill:'+(p.monthly?'var(--gold)':'var(--blue)')+';stroke:var(--s2);stroke-width:2;"/>';
+      if(p.monthly||pts.length<=10)
+        svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-(p.monthly?11:9)).toFixed(1)+'" text-anchor="middle" style="fill:'+_pctCol(p.y)+';font-size:'+(p.monthly?11:9.5)+'px;font-weight:700;">'+p.y.toFixed(0)+'%</text>';
+      if(i%step===0){
+        var lab='T'+p.termNum+(p.monthly?' MT'+p.n:' W'+p.pos);
+        svg+='<text x="'+cx.toFixed(1)+'" y="'+(H-B+16)+'" text-anchor="middle" style="fill:var(--ink3);font-size:9.5px;'+(p.monthly?'font-weight:700;':'')+'">'+lab+'</text>';
+      }
+    });
+    svg+='</svg>';
+    box+=svg
+      +'<div style="display:flex;flex-wrap:wrap;gap:12px;font-size:.68rem;color:var(--ink3);margin-top:.3rem;">'
+      +'<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--blue);margin-right:4px;"></span>Weekly quiz (/20)</span>'
+      +'<span><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);margin-right:4px;"></span>Monthly Test (/100)</span>'
+      +'<span>- - - 50% line &nbsp;·&nbsp; T = term, W = week, MT = Monthly Test</span></div>';
+    var first=pts[0].y, last=pts[pts.length-1].y, d=last-first;
+    box+='<div style="margin-top:.7rem;font-size:.8rem;">Latest: <strong style="color:'+_pctCol(last)+';">'+last.toFixed(1)+'%</strong>'
+      +(pts.length>1?' &nbsp;·&nbsp; Change since start: <strong style="color:'+(d>=0?'var(--green)':'var(--red)')+';">'+(d>=0?'▲ +':'▼ ')+d.toFixed(1)+' pts</strong>':'')+'</div>';
+  }
+
+  // Monthly Test results per subject (% only)
+  var mts=all.filter(function(p){return p.monthly;});
+  if(mts.length){
+    box+='<div style="font-size:.78rem;font-weight:700;margin:1rem 0 .4rem;">📝 Monthly Tests — % per subject</div>'
+      +'<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:.78rem;"><thead><tr><th style="text-align:left;padding:5px 6px;border-bottom:1px solid var(--bd);">Subject</th>'
+      +mts.map(function(m){return '<th style="text-align:center;padding:5px 6px;border-bottom:1px solid var(--bd);white-space:nowrap;">T'+m.termNum+' · MT'+m.n+'</th>';}).join('')+'</tr></thead><tbody>'
+      +subs.map(function(x){
+         return '<tr><td style="padding:5px 6px;border-bottom:1px solid var(--bd);">'+esc(x.name)+'</td>'
+           +mts.map(function(m){var v=m.per[x.id];return '<td style="text-align:center;padding:5px 6px;border-bottom:1px solid var(--bd);font-weight:700;color:'+_pctCol(v===undefined?null:v)+';">'+(v===undefined?'—':v.toFixed(0)+'%')+'</td>';}).join('')+'</tr>';
+       }).join('')
+      +'<tr><td style="padding:6px;font-weight:700;">Average</td>'
+      +mts.map(function(m){return '<td style="text-align:center;padding:6px;font-weight:800;color:'+_pctCol(m.avg)+';">'+m.avg.toFixed(1)+'%</td>';}).join('')+'</tr>'
+      +'</tbody></table></div>';
+  }
+  return box+'</div>';
+}
+
 // ── Parent visibility for a given class+week's morning-quiz marks ──
 // Controlled entirely by the class teacher's toggle button. This flag is
 // persisted in DB.quizVisibility and is NEVER cleared automatically —
@@ -13809,8 +15101,11 @@ function loadQuizTable(){
   if(!students.length){wrap.innerHTML='<div class="empty"><p>No students in this class.</p></div>';return;}
   var subjects=levelSubjects().filter(function(s){return s.scale!=='letter' && !s.universal;});
   if(!subjects.length){wrap.innerHTML='<div class="empty"><p>No subjects configured yet.</p></div>';return;}
+  var qCls=DB.classes.find(function(c){return c.id===cid;});
+  var MX=quizMaxFor(qCls,yr,week), isMT=isMonthlyTest(qCls,yr,week);
+  _p6DecorateWeekOptions('qz');
   var thead='<tr><th>#</th><th>Student</th>';
-  subjects.forEach(function(s){thead+='<th style="text-align:center;font-size:.72rem;">'+s.name+'<div style="font-size:.6rem;color:var(--ink3);font-weight:400;">/20</div></th>';});
+  subjects.forEach(function(s){thead+='<th style="text-align:center;font-size:.72rem;">'+s.name+'<div style="font-size:.6rem;color:var(--ink3);font-weight:400;">/'+MX+'</div></th>';});
   thead+='<th style="text-align:center;">Total</th><th style="text-align:center;">Avg%</th><th style="text-align:center;font-size:.65rem;">Parent</th></tr>';
   var subIdList=subjects.map(function(s){return s.id;}).join(',');
   var rows=students.map(function(st,i){
@@ -13839,11 +15134,11 @@ function loadQuizTable(){
       if(locked){
         row+='<td style="text-align:center;font-weight:600;color:var(--ink2);">'+(val!==''?parseFloat(val).toFixed(1):'—')+'</td>';
       } else {
-        row+='<td style="text-align:center;"><input class="mkin" type="number" id="qzk_'+st.id+'_'+sub.id+'" min="0" max="20" step="0.5" value="'+val+'" data-orig="'+val+'" oninput="previewQuizRow(\''+st.id+'\',\''+subIdList+'\')"></td>';
+        row+='<td style="text-align:center;"><input class="mkin" type="number" id="qzk_'+st.id+'_'+sub.id+'" min="0" max="'+MX+'" step="0.5" value="'+val+'" data-orig="'+val+'" oninput="previewQuizRow(\''+st.id+'\',\''+subIdList+'\')"></td>';
       }
     });
-    row+='<td style="text-align:center;font-weight:700;color:var(--gold);" id="qztot_'+st.id+'">'+(cnt>0?tot.toFixed(1)+'/'+(cnt*20):'—')+'</td>';
-    row+='<td style="text-align:center;font-size:.82rem;color:var(--blue);" id="qzavg_'+st.id+'">'+(cnt>0?((tot/(cnt*20))*100).toFixed(1)+'%':'—')+'</td>';
+    row+='<td style="text-align:center;font-weight:700;color:var(--gold);" id="qztot_'+st.id+'">'+(cnt>0?tot.toFixed(1)+'/'+(cnt*MX):'—')+'</td>';
+    row+='<td style="text-align:center;font-size:.82rem;color:var(--blue);" id="qzavg_'+st.id+'">'+(cnt>0?((tot/(cnt*MX))*100).toFixed(1)+'%':'—')+'</td>';
     // Parent chat cell
     var parReg2 = !!(DB.parents && DB.parents.find(function(p){
       return p.studentCodes && p.studentCodes.indexOf(st.sid.toUpperCase())>=0;
@@ -13868,7 +15163,9 @@ function loadQuizTable(){
     +'<button class="btn sm '+(pv?'red':'green')+'" onclick="toggleQuizParentVisibility(\''+cid+'\',\''+week+'\')">'+(pv?'🔒 Hide from Parents':'🔓 Show to Parents')+'</button>'
     +'</div>';
 
-  wrap.innerHTML=visBanner+'<div class="tw"><table><thead>'+thead+'</thead><tbody>'+rows+'</tbody></table></div>'
+  var mtBanner = isMT ? '<div class="al info" style="margin-bottom:.8rem;">📝 <strong>Monthly Test</strong> — '+esc(qCls.name)+' · all subjects are marked <strong>out of 100</strong>. Parents will see this week as “Monthly Test”.</div>'
+    : (isP6Class(qCls) ? '<div style="margin-bottom:.8rem;font-size:.74rem;color:var(--ink3);">Weekly quiz — out of 20. (Every 4th week of a term is a Monthly Test out of 100.)</div>' : '');
+  wrap.innerHTML=mtBanner+visBanner+'<div class="tw"><table><thead>'+thead+'</thead><tbody>'+rows+'</tbody></table></div>'
     +(locked
       ? '<div class="al warn" style="margin-top:.9rem;">🔒 This academic year is closed. Quiz marks are read-only.</div>'
       : '<div style="margin-top:.9rem;display:flex;gap:8px;flex-wrap:wrap;">'
@@ -13880,24 +15177,26 @@ function loadQuizTable(){
 
 function previewQuizRow(stid,subIdsStr){
   var subIds=subIdsStr.split(',');
+  var _c=document.getElementById('qzCls'), _w=document.getElementById('qzWeek');
+  var MX=quizMaxFor(DB.classes.find(function(c){return _c&&c.id===_c.value;}),getActiveQuizYear(),_w?_w.value:'');
   var tot=0;var cnt=0;
   subIds.forEach(function(sid){
     var el=document.getElementById('qzk_'+stid+'_'+sid);
     if(!el||el.value==='') return;
     var v=parseFloat(el.value);
     if(isNaN(v)) return;
-    // Clamp to max 20 and snap the field back
-    if(v>20){
-      el.value='20';
+    // Clamp to the max (20, or 100 on a P6 Monthly Test) and snap the field back
+    if(v>MX){
+      el.value=String(MX);
       el.style.borderColor='var(--gold)';
       setTimeout(function(){el.style.borderColor='';},1200);
-      v=20;
+      v=MX;
     } else if(v<0){
       el.value='0'; v=0;
     }
     tot+=v; cnt++;
   });
-  var maxT=cnt*20;
+  var maxT=cnt*MX;
   var te=document.getElementById('qztot_'+stid);
   var ae=document.getElementById('qzavg_'+stid);
   if(te) te.textContent=cnt>0?tot.toFixed(1)+'/'+maxT:'—';
@@ -13925,6 +15224,7 @@ function saveQuizMarks(){
   if(!cid||!week){alert('Select a class and week first.');return;}
   var students=yearStudents().filter(function(s){return s.classId===cid;});
   var subjects=levelSubjects().filter(function(s){return s.scale!=='letter' && !s.universal;});
+  var MX=quizMaxFor(DB.classes.find(function(c){return c.id===cid;}),yr,week);
   var cnt=0, cleared=0;
   students.forEach(function(st){
     subjects.forEach(function(sub){
@@ -13934,7 +15234,7 @@ function saveQuizMarks(){
       if(el.value!==''){
         var n=parseFloat(el.value);
         if(isNaN(n)) return;
-        var v=Math.max(0,Math.min(n,20));
+        var v=Math.max(0,Math.min(n,MX));
         DB.marks[key]=String(v);cnt++;
       } else {
         // Blank cell = vacant subject. If a mark was recorded when the table loaded
@@ -14008,6 +15308,26 @@ function _quizAbbr(name){
   return n.toUpperCase().slice(0,4);
 }
 
+// ── Week dates: each quiz week can carry a Monday start date (w.start, "YYYY-MM-DD") ──
+function _isoLocal(d){ return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2); }
+function _mondayOf(d){ var x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); var wd=(x.getDay()+6)%7; x.setDate(x.getDate()-wd); return x; }
+function _qpWeekRange(w){
+  var mon;
+  if(w && w.start && /^\d{4}-\d{2}-\d{2}$/.test(w.start)){ var p=w.start.split('-'); mon=_mondayOf(new Date(+p[0],+p[1]-1,+p[2])); }
+  else mon=_mondayOf(new Date());
+  var fri=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+4);
+  function f(d){ return d.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'}); }
+  return {iso:_isoLocal(mon), text:f(mon)+'  –  '+f(fri)};
+}
+function qpSetWeekStart(v){
+  var yr=getActiveQuizYear(), wk=document.getElementById('qpWeek').value;
+  var w=yr&&yr.weeks?yr.weeks.find(function(x){return x.id===wk;}):null;
+  if(!w||!v){ return; }
+  if(yr.locked){ alert('This academic year is locked.'); genQuizProcl(); return; }
+  var p=v.split('-'); w.start=_isoLocal(_mondayOf(new Date(+p[0],+p[1]-1,+p[2])));
+  try{ dbSave(); }catch(e){}
+  genQuizProcl();
+}
 function genQuizProcl(){
   var cid=document.getElementById('qpCls').value;
   var week=document.getElementById('qpWeek').value;
@@ -14022,18 +15342,20 @@ function genQuizProcl(){
   var cls=DB.classes.find(function(c){return c.id===cid;});
   var yr=getActiveQuizYear();
   var weekObj=yr&&yr.weeks?yr.weeks.find(function(w){return w.id===week;}):null;
-  var weekLabel=weekObj?weekObj.label:week;
+  var MX=quizMaxFor(cls,yr,week), isMT=isMonthlyTest(cls,yr,week);
+  _p6DecorateWeekOptions('qp');
+  var weekLabel=weekObj?quizWeekName(cls,yr,weekObj):week;
   var ranges=getQuizRanges();
   if(!students.length){out.innerHTML='<div class="empty"><p>No students.</p></div>';return;}
   if(!subjects.length){out.innerHTML='<div class="empty"><p>No subjects configured.</p></div>';return;}
-  var maxTotal=subjects.length*20;
+  var maxTotal=subjects.length*MX;
   var ranked=students.map(function(st){
     var tot=0;var cnt=0;
     subjects.forEach(function(sub){
       var v=DB.marks[quizMarkKey(st.id,sub.id,week)];
       if(v!==undefined&&v!==''&&!isNaN(parseFloat(v))){tot+=parseFloat(v);cnt++;}
     });
-    return Object.assign({},st,{quizTotal:cnt>0?tot:null,quizCnt:cnt,quizPct:cnt>0?(tot/(cnt*20))*100:null});
+    return Object.assign({},st,{quizTotal:cnt>0?tot:null,quizCnt:cnt,quizPct:cnt>0?(tot/(cnt*MX))*100:null});
   }).filter(function(s){return s.quizTotal!==null;}).sort(function(a,b){return b.quizPct-a.quizPct;});
   if(!ranked.length){out.innerHTML='<div class="empty"><div class="ei">🌅</div><p>No quiz marks recorded for '+weekLabel+' yet.</p></div>';return;}
   function getRangeLabel(pct){
@@ -14046,17 +15368,24 @@ function genQuizProcl(){
   var schoolName = (DB.settings&&DB.settings.schoolName)||'';
   var logoSrc = DB.settings.schoolLogo||localStorage.getItem('scorix_logo')||'';
   var html = '<div id="qpProclTable">';
-  // Header banner (printable) — enlarged for readability
-  html += '<div style="text-align:center;padding:1rem 1rem;background:var(--s1);border:1px solid var(--bd);border-radius:10px;margin-bottom:.8rem;">'
+  // Header banner (printable) — compact header, LARGE class / week / dates
+  var _rng = _qpWeekRange(weekObj);
+  var _ctU = cls ? (DB.users||[]).find(function(u){return u.role==='teacher' && u.classTeacher===cls.id;}) : null;
+  var _ctName = _ctU ? _ctU.name : '';
+  var _stIn = document.getElementById('qpWeekStart'); if(_stIn) _stIn.value = _rng.iso;
+  html += '<div class="qph-banner" style="text-align:center;padding:.6rem 1rem;background:var(--s1);border:1px solid var(--bd);border-radius:10px;margin-bottom:.8rem;">'
     +(logoSrc
-        ? '<img src="'+logoSrc+'" style="height:90px;margin-bottom:.4rem;">'
-        : '<div style="width:80px;height:80px;margin:0 auto .4rem;border:1.5px dashed var(--bd);border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--ink3);font-size:.7rem;text-align:center;line-height:1.2;">School<br>Logo</div>')
-    +(schoolName?'<div style="font-size:1.3rem;color:var(--ink2);font-weight:800;letter-spacing:.04em;text-transform:uppercase;margin-bottom:.3rem;">'+esc(schoolName)+'</div>':'')
-    +'<div style="font-family:\'Playfair Display\',serif;font-size:2rem;font-weight:800;line-height:1.15;">🌅 Morning Quiz — Proclamation List</div>'
-    +'<div style="margin-top:.5rem;display:inline-block;background:rgba(246,201,14,.15);border:2px solid rgba(208,144,16,.55);border-radius:30px;padding:4px 32px;">'
-    +'<span style="font-size:2.3rem;font-weight:900;color:var(--gold);letter-spacing:.03em;">'+(cls?esc(cls.name):'—')+'</span>'
+        ? '<img class="qph-logo" src="'+logoSrc+'" style="height:44px;margin-bottom:.2rem;">'
+        : '<div class="qph-logo" style="width:44px;height:44px;margin:0 auto .2rem;border:1.5px dashed var(--bd);border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--ink3);font-size:.55rem;text-align:center;line-height:1.1;">School<br>Logo</div>')
+    +(schoolName?'<div class="qph-school" style="font-size:.95rem;color:var(--ink2);font-weight:800;letter-spacing:.04em;text-transform:uppercase;">'+esc(schoolName)+'</div>':'')
+    +'<div class="qph-title" style="font-family:\'Playfair Display\',serif;font-size:1.1rem;font-weight:800;line-height:1.15;">'+(isMT?'📝 Monthly Test':'🌅 Morning Quiz')+' — Proclamation List</div>'
+    +'<div class="qph-meta" style="margin-top:.4rem;">'
+    +'<span class="qph-pill" style="display:inline-block;background:rgba(246,201,14,.15);border:2px solid rgba(208,144,16,.55);border-radius:30px;padding:2px 26px;margin:0 6px;">'
+    +'<span class="qph-class" style="font-size:2.3rem;font-weight:900;color:var(--gold);letter-spacing:.03em;">'+(cls?esc(cls.name):'—')+'</span></span>'
+    +'<span class="qph-week" style="display:inline-block;font-size:2.3rem;font-weight:900;color:var(--ink);margin:0 6px;">'+esc(weekLabel)+'</span>'
     +'</div>'
-    +'<div style="font-size:1.15rem;color:var(--ink2);margin-top:.4rem;font-weight:700;">'+(yr?esc(yr.label):'?')+' &nbsp;·&nbsp; '+esc(weekLabel)+'</div>'
+    +'<div class="qph-date" style="font-size:1.35rem;color:var(--ink);margin-top:.25rem;font-weight:800;">'+esc(_rng.text)+'</div>'
+    +'<div class="qph-year" style="font-size:.8rem;color:var(--ink3);font-weight:600;">'+(yr?esc(yr.label):'')+'</div>'
     +'</div>';
 
   // Table
@@ -14068,7 +15397,7 @@ function genQuizProcl(){
     +'<th style="padding:8px 8px;text-align:center;font-size:.95rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--bd);">Rank</th>'
     +'<th style="padding:8px 8px;text-align:left;font-size:.95rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--bd);">Student</th>';
   subjects.forEach(function(s){
-    html+='<th title="'+esc(s.name)+'" style="padding:8px 4px;text-align:center;font-size:1rem;font-weight:800;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid var(--bd);white-space:nowrap;">'+esc(_quizAbbr(s.name))+'<br><span style="font-weight:500;font-size:.7rem;color:var(--ink3);">/20</span></th>';
+    html+='<th title="'+esc(s.name)+'" style="padding:8px 4px;text-align:center;font-size:1rem;font-weight:800;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid var(--bd);white-space:nowrap;">'+esc(_quizAbbr(s.name))+'<br><span style="font-weight:500;font-size:.7rem;color:var(--ink3);">/'+MX+'</span></th>';
   });
   html+='<th style="padding:8px 8px;text-align:center;font-size:.95rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--bd);">Total</th>'
     +'<th style="padding:8px 8px;text-align:center;font-size:.95rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--bd);">Avg %</th>'
@@ -14087,17 +15416,19 @@ function genQuizProcl(){
     subjects.forEach(function(sub){
       var v=DB.marks[quizMarkKey(s.id,sub.id,week)];
       var val=(v!==undefined&&v!==''&&!isNaN(parseFloat(v)))?parseFloat(v):null;
-      var pct=val!==null?(val/20)*100:null;
+      var pct=val!==null?(val/MX)*100:null;
       var col=pct===null?'var(--ink3)':pct>=80?'var(--green)':pct>=60?'var(--blue)':pct>=40?'var(--gold)':'var(--red)';
       html+='<td style="padding:6px 4px;text-align:center;font-weight:900;font-size:1.35rem;color:'+col+';">'+(val!==null?val.toFixed(1):'<span style="color:var(--ink3);">—</span>')+'</td>';
     });
-    html+='<td style="padding:6px 8px;text-align:center;font-size:1.3rem;font-weight:900;color:var(--gold);">'+s.quizTotal.toFixed(1)+'/'+(s.quizCnt*20)+'</td>'
+    html+='<td style="padding:6px 8px;text-align:center;font-size:1.3rem;font-weight:900;color:var(--gold);">'+s.quizTotal.toFixed(1)+'<div class="qp-tmax" style="font-size:.6em;font-weight:700;opacity:.85;line-height:1.1;">/'+(s.quizCnt*MX)+'</div></td>'
       +'<td style="padding:6px 8px;text-align:center;font-size:1.15rem;font-weight:800;color:var(--blue);">'+s.quizPct.toFixed(1)+'%</td>'
       +'<td style="padding:6px 8px;text-align:center;"><span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:.85rem;font-weight:700;background:'+r.color+'22;color:'+r.color+';border:1px solid '+r.color+'44;">'+esc(r.label)+'</span></td>'
       +'</tr>';
   });
-  html+='</tbody></table></div></div>';
-  out.innerHTML=html;
+  html+='</tbody></table></div>' + p6BandsHtml(cid,week)
+    +'<div class="qp-doneby" style="text-align:right;margin-top:14px;padding-right:6px;font-size:1.2rem;font-weight:800;color:var(--ink);">Done by: <span style="display:inline-block;min-width:170px;border-bottom:2px solid var(--ink);padding:0 8px;">'+esc(_ctName)+'</span></div>'
+    +'</div>';
+  out.innerHTML=html + p6MonthlyAnalysisHtml(cid,week);
   genQuizBreakdown(students,subjects,cid,week,maxTotal,ranges);
 }
 
@@ -14125,7 +15456,8 @@ function genQuizBreakdown(students, subjects, cid, week, maxTotal, ranges){
   var cls = DB.classes.find(function(c){return c.id===cid;});
   var yr = getActiveQuizYear();
   var weekObj = yr&&yr.weeks ? yr.weeks.find(function(w){return w.id===week;}) : null;
-  var weekLabel = weekObj ? weekObj.label : week;
+  var MX = quizMaxFor(cls,yr,week);
+  var weekLabel = weekObj ? quizWeekName(cls,yr,weekObj) : week;
 
   // Build ranked list for position column
   var ranked = students.map(function(st){
@@ -14150,7 +15482,7 @@ function genQuizBreakdown(students, subjects, cid, week, maxTotal, ranges){
     +'<th>Student</th>';
   subjects.forEach(function(s){
     thead += '<th style="text-align:center;font-size:.68rem;white-space:nowrap;">'+s.name
-      +'<div style="font-size:.6rem;color:var(--ink3);font-weight:400;">/20</div></th>';
+      +'<div style="font-size:.6rem;color:var(--ink3);font-weight:400;">/'+MX+'</div></th>';
   });
   thead += '<th style="text-align:center;font-size:.68rem;">Total</th>'
     +'<th style="text-align:center;font-size:.68rem;">Avg%</th>'
@@ -14164,12 +15496,12 @@ function genQuizBreakdown(students, subjects, cid, week, maxTotal, ranges){
       var v = DB.marks[quizMarkKey(st.id,sub.id,week)];
       var val = (v!==undefined&&v!==''&&!isNaN(parseFloat(v))) ? parseFloat(v) : null;
       if(val!==null){tot+=val;cnt++;}
-      var pct = val!==null ? (val/20)*100 : null;
+      var pct = val!==null ? (val/MX)*100 : null;
       var color = pct===null?'var(--ink3)':pct>=80?'var(--green)':pct>=60?'var(--blue)':pct>=40?'var(--gold)':'var(--red)';
       return '<td style="text-align:center;font-size:.84rem;font-weight:'+(val!==null?'600':'400')+';color:'+color+';">'
         +(val!==null?val.toFixed(1):'<span style=\'color:var(--ink3);\'>—</span>')+'</td>';
     }).join('');
-    var avg = cnt>0 ? ((tot/(cnt*20))*100) : null;
+    var avg = cnt>0 ? ((tot/(cnt*MX))*100) : null;
     var rank = rankMap[st.id];
     var rankStr = rank ? (rank===1?'&#129351;':rank===2?'&#129352;':rank===3?'&#129353;':'<strong>'+rank+'</strong>') : '—';
     var rangeObj = avg!==null ? (function(){ for(var i=0;i<ranges.length;i++){if(avg>=ranges[i].min&&avg<=ranges[i].max)return ranges[i];} return{label:'—',color:'#888'}; })() : {label:'—',color:'#888'};
@@ -14178,7 +15510,7 @@ function genQuizBreakdown(students, subjects, cid, week, maxTotal, ranges){
       +'<td style="text-align:center;font-size:.8rem;color:var(--ink3);">'+(i+1)+'</td>'
       +'<td><strong style="font-size:.88rem;">'+st.name+'</strong><div style="font-size:.68rem;color:var(--ink3);">'+st.sid+'</div></td>'
       +cells
-      +'<td style="text-align:center;font-weight:700;color:var(--gold);">'+(cnt>0?tot.toFixed(1)+'/'+(cnt*20):'—')+'</td>'
+      +'<td style="text-align:center;font-weight:700;color:var(--gold);">'+(cnt>0?tot.toFixed(1)+'/'+(cnt*MX):'—')+'</td>'
       +'<td style="text-align:center;font-weight:700;color:var(--blue);">'+(avg!==null?avg.toFixed(1)+'%':'—')+'</td>'
       +'<td style="text-align:center;font-size:.95rem;">'+rankStr+'</td>'
       +'<td style="text-align:center;"><span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:.68rem;font-weight:700;background:'+rangeObj.color+'22;color:'+rangeObj.color+';border:1px solid '+rangeObj.color+'44;">'+rangeObj.label+'</span></td>'
@@ -14824,7 +16156,7 @@ function saveSchool(){
 async function initApp(){
   // Load any queued writes from previous sessions (offline work)
   _loadOfflineQueue();
-  if(_isOnline && _offlineQueue.length) _drainQueue();
+  var _qDrain = (_isOnline && _offlineQueue.length) ? _drainQueue() : null;
 
   var overlay=document.createElement('div');
   overlay.id='loadOverlay';
@@ -14834,6 +16166,8 @@ async function initApp(){
     +'<div style="width:48px;height:4px;background:var(--s3);border-radius:4px;overflow:hidden;"><div id="loadBar" style="height:100%;width:0%;background:var(--gold);border-radius:4px;transition:width .3s;"></div></div>';
   document.body.appendChild(overlay);
   document.getElementById('loadBar').style.width='20%';
+  // Upload any changes saved locally before the last tab close, before loading fresh data
+  if(_qDrain){ try{ await _qDrain; }catch(e){} }
 
   // ── STEP 1: Instant boot from localStorage (zero network, ~0ms) ──
   try{
@@ -15282,10 +16616,18 @@ function _resolveCssVars(html){
 // window.open() and silently fall back to printing the current page — that
 // fallback used to skip sizing entirely, which is why fitting could fail.
 function _fitThenPrint(doc, win, autofit, afterPrint){
+  var printed=false, wd=null;
   function doPrint(){
-    try{ win.print(); }catch(e){}
+    if(printed) return; printed=true;
+    if(wd) clearTimeout(wd);
+    try{ win.focus(); }catch(e){}
+    try{ win.print(); }catch(e){
+      try{ alert('Could not open the print dialog automatically. Use the browser menu \u2192 Print.'); }catch(_){}
+    }
     if(afterPrint) afterPrint();
   }
+  // Watchdog: if anything in the fit pass stalls, still print instead of doing nothing
+  wd = setTimeout(doPrint, 10000);
   if(!autofit || !autofit.pageHeightPx){ setTimeout(doPrint, 450); return; }
   var ph=autofit.pageHeightPx, bf=autofit.baseFontPx||13, bp=autofit.basePadPx||5,
       mnf=autofit.minFontPx||7, mxf=autofit.maxFontPx||18, pw=autofit.pageWidthPx||0;
@@ -15359,12 +16701,33 @@ function _fitThenPrint(doc, win, autofit, afterPrint){
         }
       }, 80);
     }
+    // Freeze column widths at their normal (base-size) layout BEFORE enlarging text,
+    // so bigger names/marks never change the cell widths.
+    if(autofit.lockColumns){
+      apply();
+      try{
+        wrap.querySelectorAll('table').forEach(function(tb){
+          var ths = tb.querySelectorAll('thead tr:first-child th');
+          if(!ths.length) return;
+          var ws = [].map.call(ths, function(th){ return th.getBoundingClientRect().width; });
+          var tot = ws.reduce(function(a,b){ return a+b; }, 0) || 1;
+          var cg = doc.createElement('colgroup');
+          ws.forEach(function(w){ var c=doc.createElement('col'); c.style.width=(w/tot*100)+'%'; cg.appendChild(c); });
+          tb.insertBefore(cg, tb.firstChild);
+          tb.style.tableLayout = 'fixed';
+          tb.style.width = '100%';
+        });
+      }catch(e){}
+    }
     step();
   }
+  var started=false;
+  function startOnce(){ if(started) return; started=true; try{ go(); }catch(e){ doPrint(); } }
   try{
-    if(doc.fonts && doc.fonts.ready){ doc.fonts.ready.then(function(){ setTimeout(go, 200); }); }
-    else{ setTimeout(go, 400); }
-  }catch(e){ setTimeout(go, 400); }
+    if(doc.fonts && doc.fonts.ready){ doc.fonts.ready.then(function(){ setTimeout(startOnce, 200); }); }
+    else{ setTimeout(startOnce, 400); }
+  }catch(e){ setTimeout(startOnce, 400); }
+  setTimeout(startOnce, 1500);   // never wait on web fonts (offline / slow network)
 }
 
 function _openPrintWindow(bodyHtml, isT3Card, printTitle, autofit){
@@ -15374,7 +16737,7 @@ function _openPrintWindow(bodyHtml, isT3Card, printTitle, autofit){
   var docTitle   = (printTitle || 'Report Card') + ' — SCORIX';
   var fullHtml = '<!DOCTYPE html><html><head>'
     +'<meta charset="UTF-8">'
-    +'<meta name="viewport" content="width=device-width,initial-scale=1">'
+    +'<meta name="viewport" content="'+((autofit&&autofit.viewportW)?('width='+autofit.viewportW):'width=device-width,initial-scale=1')+'">'
     +'<title>'+docTitle+'</title>'
     +'<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">'
     +'<style>'
@@ -15401,26 +16764,38 @@ function _openPrintWindow(bodyHtml, isT3Card, printTitle, autofit){
     + bodyHtml
     +'</body></html>';
 
-  var win = window.open('','_blank');
-  if(win){
-    win.document.open();
-    win.document.write(fullHtml);
-    win.document.close();
-    // Force title immediately so Android Chrome uses it as the PDF save name
-    win.document.title = docTitle;
-    _fitThenPrint(win.document, win, autofit);
-  } else {
-    // Popup blocked — fallback to print-area method on the current page.
-    // #print-area is display:none on screen (only shown via @media print),
-    // so it must be forced visible — off-screen — while we measure it,
-    // otherwise scrollHeight reads 0 and the fit pass can't work at all.
-    var pa = document.getElementById('print-area');
-    pa.innerHTML = '<div style="background:#fff;color:#1a1d2e;font-family:Outfit,Arial,sans-serif;">' + bodyHtml + '</div>';
-    pa.style.cssText = 'display:block;position:fixed;left:-9999px;top:0;background:#fff;';
+  var win = null;
+  try{ win = window.open('','_blank'); }catch(e){ win = null; }
+  var usedPopup = false;
+  if(win && !win.closed){
+    try{
+      win.document.open();
+      win.document.write(fullHtml);
+      win.document.close();
+      win.document.title = docTitle;   // Android Chrome uses it as the PDF name
+      usedPopup = true;
+      _fitThenPrint(win.document, win, autofit);
+    }catch(e){ usedPopup = false; try{ win.close(); }catch(_){} }
+  }
+  if(!usedPopup){
+    // Popup blocked/failed — print from an isolated hidden iframe (own styles, own layout,
+    // never touches the app page, and still measured so the fit works).
+    var old = document.getElementById('_printFrame');
+    if(old) old.parentNode.removeChild(old);
+    var fr = document.createElement('iframe');
+    fr.id = '_printFrame';
+    fr.style.cssText = 'position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;visibility:hidden;';
+    document.body.appendChild(fr);
+    var idoc = fr.contentWindow.document;
+    idoc.open(); idoc.write(fullHtml); idoc.close();
     var _prevTitle = document.title;
     document.title = docTitle;
-    _fitThenPrint(document, window, autofit, function(){
-      setTimeout(function(){ pa.innerHTML=''; pa.style.cssText='display:none;'; document.title = _prevTitle; }, 2500);
+    _fitThenPrint(idoc, fr.contentWindow, autofit, function(){
+      setTimeout(function(){
+        document.title = _prevTitle;
+        var f = document.getElementById('_printFrame');
+        if(f && f.parentNode) f.parentNode.removeChild(f);
+      }, 60000);
     });
   }
 }
@@ -15474,7 +16849,7 @@ function _doPrint(sourceId){
         existing.approved=true;
         DB.approvals[cid2+'_'+tid2]=existing;
         addLog('🖨️ Director printed report cards — '+cid2+' / '+tid2+' — LOCKED');
-        dbSave();
+        try{ dbSave(); }catch(e){ console.warn('dbSave before print failed', e); }
       }
     }
   }
@@ -15494,18 +16869,38 @@ function printProcl(){
   var clsName = clsSel && clsSel.options[clsSel.selectedIndex] ? clsSel.options[clsSel.selectedIndex].text.trim() : '';
   var trmName = trmSel && trmSel.options[trmSel.selectedIndex] ? trmSel.options[trmSel.selectedIndex].text.trim() : '';
   var proclTitle = 'Proclamation List' + (clsName ? ' — ' + clsName : '') + (trmName ? ' — ' + trmName : '');
+  var COMPACT_HDR = '<style>'
+    +'.qph-banner{padding:4px 10px!important;margin-bottom:5px!important;border-radius:6px!important;display:flex!important;flex-wrap:wrap;align-items:center;justify-content:center;column-gap:12px;row-gap:0;}'
+    +'.qph-logo{height:34px!important;width:34px!important;margin:0!important;border-width:0!important;font-size:0!important;object-fit:contain;}'
+    +'.qph-school{font-size:.85rem!important;margin:0!important;letter-spacing:.03em!important;}'
+    +'.qph-title{font-size:1.05rem!important;margin:0!important;line-height:1.2!important;}'
+    +'.qph-pill{margin:0!important;padding:0 12px!important;border-width:1.5px!important;}'
+    +'.qph-class{font-size:1rem!important;}'
+    +'.qph-date{display:inline-block!important;font-size:.78rem!important;margin:0!important;}'
+    +'</style>';
+  var PAGE_W_PX = 728, PAGE_H_PX = 935;   // A4 portrait, safe for Letter too
   var printStyles = '<style>'
-    +'table{border-collapse:collapse;width:100%;font-size:.8rem;}'
-    +'th,td{border:1px solid #c0c8e0;padding:6px 8px;}'
+    +':root{--pxf:11px;--pxp:4px;--pxv:0px;}'
+    +'@page{size:A4 portrait;margin:8mm;}'
+    +'html,body{padding:0!important;margin:0!important;}'
+    +'@media print{html,body{height:250mm!important;max-height:250mm!important;overflow:hidden!important;}}'
+    +'#fitWrap{width:'+PAGE_W_PX+'px;margin:0 auto;}'
+    +'.card{overflow:visible!important;margin-bottom:calc(var(--pxp) * 2)!important;}'
+    +'.tw{overflow:visible!important;}'
+    +'table{border-collapse:collapse;width:100%;table-layout:auto;font-size:var(--pxf);}'
+    +'th,td{border:1px solid #c0c8e0;padding:calc(var(--pxp) + var(--pxv)) calc(var(--pxp) * 1.15)!important;min-width:0!important;overflow-wrap:break-word;}'
     +'thead tr{background:#e8ecf7!important;}'
     +'tbody tr:nth-child(even) td{background:#f5f7fc!important;}'
-    +'.rcirc{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;font-weight:700;font-size:.8rem;}'
-    +'.r1{background:#f6c90e;color:#1a1200;}'
-    +'.r2{background:#b0bec5;color:#1a1200;}'
-    +'.r3{background:#cd7f32;color:#fff;}'
-    +'.rn{background:#e8ecf7;color:#2a2f4e;}'
+    +'.ctitle{font-size:calc(var(--pxf) * 1.2)!important;margin-bottom:var(--pxp)!important;}'
+    +'.rcirc{display:inline-flex;align-items:center;justify-content:center;width:calc(var(--pxf) * 1.85);height:calc(var(--pxf) * 1.85);border-radius:50%;font-weight:700;font-size:calc(var(--pxf) * .92);}'
+    +'.r1{background:#f6c90e;color:#1a1200;}.r2{background:#b0bec5;color:#1a1200;}.r3{background:#cd7f32;color:#fff;}.rn{background:#e8ecf7;color:#2a2f4e;}'
+    +'tbody td{font-size:calc(var(--pxf) * 1.8)!important;font-weight:700!important;}'
+    +'tbody td strong{font-size:calc(var(--pxf) * 1.9)!important;font-weight:700!important;line-height:1.15;}'
+    +'tbody td div{font-size:calc(var(--pxf) * 1)!important;font-weight:400!important;}'
     +'</style>';
-  _openPrintWindow(printStyles + _resolveCssVars(src.innerHTML), false, proclTitle);
+  _openPrintWindow(printStyles + COMPACT_HDR + '<div id="fitWrap">' + _resolveCssVars(src.innerHTML) + '</div>', false, proclTitle, {
+    pageHeightPx: PAGE_H_PX, pageWidthPx: PAGE_W_PX, baseFontPx: 11, basePadPx: 4, minFontPx: 6, maxFontPx: 22, stretchRows: true, lockColumns: true
+  });
 }
 function printQuizProcl(){
   var out = document.getElementById('qpOut');
@@ -15513,6 +16908,8 @@ function printQuizProcl(){
   // Print whichever view is currently active
   var activeEl = (_quizView==='breakdown' && bd && bd.style.display!=='none') ? bd : out;
   var content  = activeEl ? activeEl.innerHTML : '';
+  var _pt = (activeEl===out) ? document.getElementById('qpProclTable') : null;
+  if(_pt) content = _pt.outerHTML;   // print the proclamation (rankings + Monthly Test analysis) only
   if(!content.trim() || content.indexOf('class="empty"')>=0){
     alert('Nothing to print yet. Select class and week first.');
     return;
@@ -15528,21 +16925,53 @@ function printQuizProcl(){
   // measuring the rendered table, so the list always fills exactly one A4
   // landscape page — never spilling to a 2nd/3rd sheet, and never left tiny
   // on an otherwise-empty page for small classes.
-  var PAGE_W_PX = 728;  // A4 PORTRAIT, 8mm margins, 96dpi (194mm)
-  var PAGE_H_PX = 960;  // safe for BOTH Letter (996px usable) and A4 (1062px usable) — phones often default to Letter
+  var COMPACT_HDR = '<style>'
+    +'.qph-banner{padding:2px 10px!important;margin-bottom:4px!important;border-radius:6px!important;text-align:center;}'
+    +'.qph-logo{height:62px!important;width:62px!important;margin:0 10px 0 0!important;border-width:0!important;font-size:0!important;object-fit:contain;display:inline-block!important;vertical-align:middle;}'
+    +'.qph-school{font-size:16px!important;margin:0 10px 0 0!important;letter-spacing:.03em!important;display:inline-block!important;vertical-align:middle;}'
+    +'.qph-title{font-size:18px!important;margin:0!important;line-height:1.2!important;display:inline-block!important;vertical-align:middle;}'
+    +'.qph-meta{display:block!important;margin:2px 0 0!important;}'
+    +'.qph-pill{margin:0 8px!important;padding:0 20px!important;border-width:2px!important;}'
+    +'.qph-class{font-size:34px!important;font-weight:900!important;line-height:1.1!important;}'
+    +'.qph-week{font-size:34px!important;font-weight:900!important;line-height:1.1!important;margin:0 8px!important;}'
+    +'.qph-date{display:block!important;font-size:19px!important;font-weight:800!important;margin:1px 0 0!important;line-height:1.2!important;}'
+    +'.qph-year{display:block!important;font-size:11px!important;margin:0!important;line-height:1.2!important;}'
+    +'.qp-doneby{text-align:right!important;font-size:18px!important;font-weight:800!important;margin-top:8px!important;color:#000!important;}'
+    +'.qp-doneby span{border-bottom:2px solid #000!important;color:#000!important;min-width:200px!important;}'
+    +'</style>';
+  var PAGE_W_PX = 754;  // Letter portrait, 8mm side margins (199.9mm) at 96dpi — fills the full width
+  var PAGE_H_PX = 954;  // Letter 279.4mm minus 8mm top and 17mm bottom margin (>1.5cm) = 254mm usable
   var printStyles = '<style>'
     +':root{--pxf:11px;--pxp:4px;--pxv:0px;}'
-    +'@page{size:A4 portrait;margin:8mm;}'
+    +'@page{size:Letter portrait;margin:8mm 8mm 17mm 8mm;}'
+    +'html{-webkit-text-size-adjust:100%!important;text-size-adjust:100%!important;}'
     +'html,body{padding:0!important;margin:0!important;}'
+    +'@media print{html,body{height:253mm!important;max-height:253mm!important;overflow:hidden!important;}}'
     +'body{width:100%;}'
     +'#fitWrap{width:'+PAGE_W_PX+'px;margin:0 auto;}'
+    // Print-only safety net: whatever the measured height was, the list itself must fill the whole
+    // page (rows stretch, "Done by" stays on the bottom line, inside the 17mm bottom margin).
+    +'@media print{#fitWrap{min-height:253mm;display:flex;flex-direction:column;}'
+    +'#fitWrap>#qpProclTable{flex:1 1 auto;display:flex;flex-direction:column;}'
+    +'#qpProclTable>.card{flex:1 1 auto;display:flex;flex-direction:column;}'
+    +'#qpProclTable>.card>table{flex:1 1 auto;}}'
     +'.card{overflow:visible!important;}'
     +'table{border-collapse:collapse;width:100%;table-layout:fixed;font-size:var(--pxf);}'
     +'th,td{border:1px solid #c0c8e0;padding:calc(var(--pxp) + var(--pxv)) calc(var(--pxp) * 1.15)!important;white-space:normal!important;word-wrap:break-word;overflow-wrap:break-word;}'
     +'thead tr{background:#e8ecf7!important;}'
     +'tbody tr:nth-child(even) td{background:#f5f7fc!important;}'
     +'th:first-child,td:first-child{width:5%;}'
-    +'th:nth-child(2),td:nth-child(2){width:19%;text-align:left;}'
+    +'th:nth-child(2),td:nth-child(2){width:20%;text-align:left;}'
+    +'#qpProclTable th:first-child,#qpProclTable td:first-child{width:4.5%!important;}'
+    +'#qpProclTable th:nth-last-child(3),#qpProclTable td:nth-last-child(3){width:8.5%!important;}'
+    +'#qpProclTable th:nth-last-child(2),#qpProclTable td:nth-last-child(2){width:8%!important;}'
+    +'#qpProclTable th:last-child,#qpProclTable td:last-child{width:5.5%!important;}'
+    +'#qpProclTable tbody td{font-size:1.35rem!important;font-weight:900!important;white-space:nowrap!important;padding-left:2px!important;padding-right:2px!important;overflow:hidden;}'
+    +'#qpProclTable tbody td:nth-last-child(3){font-size:1.25rem!important;}'
+    +'#qpProclTable tbody td:nth-last-child(2){font-size:1.1rem!important;}'
+    +'#qpProclTable tbody td:nth-child(2){white-space:normal!important;padding-left:5px!important;}'
+    +'#qpProclTable tbody td:nth-child(2) div{font-size:1.3rem!important;font-weight:800!important;line-height:1.15!important;}'
+    +'#qpProclTable thead th{font-size:.9rem!important;padding-left:1px!important;padding-right:1px!important;}'
     +'.ctitle{display:none!important;}'
     +'.rcirc{display:inline-flex;align-items:center;justify-content:center;width:calc(var(--pxf) * 1.85);height:calc(var(--pxf) * 1.85);border-radius:50%;font-weight:700;font-size:calc(var(--pxf) * .92);}'
     +'.r1{background:#f6c90e;color:#1a1200;}'
@@ -15550,12 +16979,37 @@ function printQuizProcl(){
     +'.r3{background:#cd7f32;color:#fff;}'
     +'.rn{background:#e8ecf7;color:#2a2f4e;}'
     +'#qpProclTable{width:100%!important;}'
-    +'#qpProclTable > div:first-child{padding:calc(var(--pxp) * 1.4) calc(var(--pxp) * 2)!important;margin-bottom:calc(var(--pxp) * 1.4)!important;}'
+    +'.p6mt th:first-child,.p6mt td:first-child{width:24%!important;text-align:left!important;}'
+    +'.p6mt th:nth-child(2),.p6mt td:nth-child(2){width:auto!important;text-align:center!important;}'
+    +'.p6mt .p6mt-title{display:block!important;}'
     +'.ctitle{font-size:calc(var(--pxf) * 1.2)!important;margin-bottom:var(--pxp)!important;}'
     +'</style>';
-  var fitBody = printStyles + '<div id="fitWrap">' + _resolveCssVars(content) + '</div>';
+  // ── P6 Monthly Test: no squeeze-to-one-page. Rankings print at a readable size
+  // (may run to 2-3 pages) and the score-range analysis starts on its own page. ──
+  if(content.indexOf('p6mt')>=0){
+    var mtStyles = '<style>'
+      +'html{font-size:12px;}'
+      +'@page{size:Letter portrait;margin:8mm 8mm 17mm 8mm;}'
+      +'html,body{padding:0!important;margin:0!important;height:auto!important;max-height:none!important;overflow:visible!important;}'
+      +'table{border-collapse:collapse;width:100%;}'
+      +'th,td{border:1px solid #c0c8e0;padding:4px 6px!important;}'
+      +'thead{display:table-header-group;}'
+      +'tr{page-break-inside:avoid;}'
+      +'thead tr{background:#e8ecf7!important;}'
+      +'.card{overflow:visible!important;}'
+      +'.rcirc{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;font-weight:700;font-size:.95rem;}'
+      +'.r1{background:#f6c90e;color:#1a1200;}.r2{background:#b0bec5;color:#1a1200;}.r3{background:#cd7f32;color:#fff;}.rn{background:#e8ecf7;color:#2a2f4e;}'
+      +'.ctitle{margin-bottom:6px;}'
+      +'.p6mt{page-break-inside:avoid;break-inside:avoid;margin-top:8px!important;}'
+      +'.p6mt th,.p6mt td{font-size:1.05rem!important;padding:6px 8px!important;}'
+      +'.p6mt .p6mt-title{font-size:1.3rem!important;margin-bottom:4px!important;}'
+      +'</style>';
+    _openPrintWindow(mtStyles + COMPACT_HDR + '<div>' + _resolveCssVars(content) + '</div>', false, quizProclTitle, null);
+    return;
+  }
+  var fitBody = printStyles + COMPACT_HDR + '<div id="fitWrap">' + _resolveCssVars(content) + '</div>';
   _openPrintWindow(fitBody, false, quizProclTitle, {
-    pageHeightPx: PAGE_H_PX, pageWidthPx: PAGE_W_PX, baseFontPx: 11, basePadPx: 4, minFontPx: 6, maxFontPx: 16, stretchRows: true
+    pageHeightPx: PAGE_H_PX, pageWidthPx: PAGE_W_PX, baseFontPx: 11, basePadPx: 4, minFontPx: 6, maxFontPx: 12.5, stretchRows: true, viewportW: PAGE_W_PX + 32
   });
 }
 
