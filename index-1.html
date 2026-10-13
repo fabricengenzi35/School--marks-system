@@ -16737,7 +16737,7 @@ function _openPrintWindow(bodyHtml, isT3Card, printTitle, autofit){
   var docTitle   = (printTitle || 'Report Card') + ' — SCORIX';
   var fullHtml = '<!DOCTYPE html><html><head>'
     +'<meta charset="UTF-8">'
-    +'<meta name="viewport" content="width=device-width,initial-scale=1">'
+    +'<meta name="viewport" content="'+((autofit&&autofit.viewportW)?('width='+autofit.viewportW):'width=device-width,initial-scale=1')+'">'
     +'<title>'+docTitle+'</title>'
     +'<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">'
     +'<style>'
@@ -16939,15 +16939,22 @@ function printQuizProcl(){
     +'.qp-doneby{text-align:right!important;font-size:18px!important;font-weight:800!important;margin-top:8px!important;color:#000!important;}'
     +'.qp-doneby span{border-bottom:2px solid #000!important;color:#000!important;min-width:200px!important;}'
     +'</style>';
-  var PAGE_W_PX = 728;  // A4 PORTRAIT, 8mm margins, 96dpi (194mm)
-  var PAGE_H_PX = 935;  // safe for BOTH Letter (996px usable) and A4 (1062px usable) — phones often default to Letter
+  var PAGE_W_PX = 754;  // Letter portrait, 8mm side margins (199.9mm) at 96dpi — fills the full width
+  var PAGE_H_PX = 954;  // Letter 279.4mm minus 8mm top and 17mm bottom margin (>1.5cm) = 254mm usable
   var printStyles = '<style>'
     +':root{--pxf:11px;--pxp:4px;--pxv:0px;}'
-    +'@page{size:A4 portrait;margin:8mm;}'
+    +'@page{size:Letter portrait;margin:8mm 8mm 17mm 8mm;}'
+    +'html{-webkit-text-size-adjust:100%!important;text-size-adjust:100%!important;}'
     +'html,body{padding:0!important;margin:0!important;}'
-    +'@media print{html,body{height:250mm!important;max-height:250mm!important;overflow:hidden!important;}}'
+    +'@media print{html,body{height:253mm!important;max-height:253mm!important;overflow:hidden!important;}}'
     +'body{width:100%;}'
     +'#fitWrap{width:'+PAGE_W_PX+'px;margin:0 auto;}'
+    // Print-only safety net: whatever the measured height was, the list itself must fill the whole
+    // page (rows stretch, "Done by" stays on the bottom line, inside the 17mm bottom margin).
+    +'@media print{#fitWrap{min-height:253mm;display:flex;flex-direction:column;}'
+    +'#fitWrap>#qpProclTable{flex:1 1 auto;display:flex;flex-direction:column;}'
+    +'#qpProclTable>.card{flex:1 1 auto;display:flex;flex-direction:column;}'
+    +'#qpProclTable>.card>table{flex:1 1 auto;}}'
     +'.card{overflow:visible!important;}'
     +'table{border-collapse:collapse;width:100%;table-layout:fixed;font-size:var(--pxf);}'
     +'th,td{border:1px solid #c0c8e0;padding:calc(var(--pxp) + var(--pxv)) calc(var(--pxp) * 1.15)!important;white-space:normal!important;word-wrap:break-word;overflow-wrap:break-word;}'
@@ -16982,7 +16989,7 @@ function printQuizProcl(){
   if(content.indexOf('p6mt')>=0){
     var mtStyles = '<style>'
       +'html{font-size:12px;}'
-      +'@page{size:A4 portrait;margin:8mm;}'
+      +'@page{size:Letter portrait;margin:8mm 8mm 17mm 8mm;}'
       +'html,body{padding:0!important;margin:0!important;height:auto!important;max-height:none!important;overflow:visible!important;}'
       +'table{border-collapse:collapse;width:100%;}'
       +'th,td{border:1px solid #c0c8e0;padding:4px 6px!important;}'
@@ -17002,7 +17009,7 @@ function printQuizProcl(){
   }
   var fitBody = printStyles + COMPACT_HDR + '<div id="fitWrap">' + _resolveCssVars(content) + '</div>';
   _openPrintWindow(fitBody, false, quizProclTitle, {
-    pageHeightPx: PAGE_H_PX, pageWidthPx: PAGE_W_PX, baseFontPx: 11, basePadPx: 4, minFontPx: 6, maxFontPx: 12.5, stretchRows: true
+    pageHeightPx: PAGE_H_PX, pageWidthPx: PAGE_W_PX, baseFontPx: 11, basePadPx: 4, minFontPx: 6, maxFontPx: 12.5, stretchRows: true, viewportW: PAGE_W_PX + 32
   });
 }
 
